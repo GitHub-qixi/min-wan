@@ -1,0 +1,188 @@
+"""测试用的扩展与授权校验器：一个公开路由、一个内部端口路由、一种后台任务、一条自己的迁移分支。"""
+
+from pathlib import Path
+
+from fastapi import APIRouter
+
+from knowwork_server.extensions import LicenseState
+from knowwork_server.jobs import JobKind
+
+PING_KIND = JobKind("demo.ping")
+
+
+class Demo:
+    name = "demo"
+    license_module = "demo"
+    model_modules: tuple[str, ...] = ()
+    rls_tables = ("demo_note",)
+    migrations = Path(__file__).with_name("demo_migrations")
+
+    def __init__(self) -> None:
+        self.contexts: list = []
+        self.started = False
+        self.closed = False
+
+    def setup_api(self, ctx):
+        self.contexts.append(ctx)
+        router = APIRouter(prefix="/api/demo")
+
+        @router.get("/ping")
+        async def ping():
+            return {"pong": True}
+
+        return [router]
+
+    def setup_internal(self, ctx):
+        router = APIRouter(prefix="/internal/demo")
+
+        @router.get("/ping")
+        async def ping():
+            return {"internal": True}
+
+        return [router]
+
+    def setup_worker(self, ctx):
+        async def handle(job_ctx):
+            return None
+
+        ctx.runner.register(PING_KIND, handle)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class Broken(Demo):
+    name = "broken"
+
+    def setup_api(self, ctx):
+        raise RuntimeError("装配失败")
+
+
+class BrokenInside(Demo):
+    """公开路由装得上、内部路由装配报错：整个扩展去掉，公开路由也不留。"""
+
+    name = "broken-inside"
+
+    def setup_internal(self, ctx):
+        raise RuntimeError("内部路由装配失败")
+
+
+class PublicOnly:
+    """老扩展没有 setup_internal：照常加载，只挂公开路由。"""
+
+    name = "public-only"
+    license_module = "demo"
+    model_modules: tuple[str, ...] = ()
+    rls_tables: tuple[str, ...] = ()
+    migrations = None
+
+    def setup_api(self, ctx):
+        router = APIRouter(prefix="/api/public-only")
+
+        @router.get("/ping")
+        async def ping():
+            return {"pong": True}
+
+        return [router]
+
+    def setup_worker(self, ctx):
+        return None
+
+    async def start(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+class Addon(Demo):
+    """依赖 demo 的扩展（requires）：demo 没启用它也不启用。"""
+
+    name = "addon"
+    license_module = "addon"
+    rls_tables = ()
+    migrations = None
+    requires = ("demo",)
+
+
+class Free(Demo):
+    """不需要授权模块的扩展（license_module 为 None）：装了就启用，授权有没有、过没过期都不影响它。"""
+
+    name = "free"
+    license_module = None
+    rls_tables = ()
+    migrations = None
+
+
+class Editing(Free):
+    """提供编辑器（setup_editor）的扩展：整个 ASGI 应用挂在编辑器端口上，原样看到请求的路径；WebSocket 上每收到一条回它的长度。"""
+
+    name = "editing"
+
+    def setup_editor(self, ctx):
+        async def echo_lengths(receive, send):
+            await receive()  # websocket.connect
+            await send({"type": "websocket.accept"})
+            while (message := await receive())["type"] == "websocket.receive":
+                size = len(message.get("text") or "") or len(message.get("bytes") or b"")
+                await send({"type": "websocket.send", "text": str(size)})
+
+        async def app(scope, receive, send):
+            if scope["type"] == "websocket":
+                await echo_lengths(receive, send)
+                return
+            if scope["type"] != "http":
+                return
+            body = f'{{"editor": true, "path": "{scope["raw_path"].decode()}"}}'.encode()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": body})
+
+        return app
+
+
+EXTENSION = Demo()
+ADDON = Addon()
+EDITING = Editing()
+FREE = Free()
+BROKEN = Broken()
+BROKEN_INSIDE = BrokenInside()
+PUBLIC_ONLY = PublicOnly()
+NOT_AN_EXTENSION = object()
+
+
+class Granting:
+    def __init__(self, *modules: str) -> None:
+        self.modules = frozenset(modules)
+
+    def verify(self) -> LicenseState:
+        return LicenseState(status="valid", message="授权有效", modules=self.modules, customer="测试客户")
+
+
+def granting_demo() -> Granting:
+    return Granting("demo")
+
+
+def granting_both() -> Granting:
+    return Granting("demo", "addon")
+
+
+def granting_addon() -> Granting:
+    return Granting("addon")
+
+
+def granting_other() -> Granting:
+    return Granting("other")
+
+
+class Exploding:
+    def verify(self) -> LicenseState:
+        raise ValueError("签名对不上")
+
+
+class Expired:
+    def verify(self) -> LicenseState:
+        return LicenseState(status="expired", message="授权已于 2026-01-01 过期")

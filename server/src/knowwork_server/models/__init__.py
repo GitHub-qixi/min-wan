@@ -1,0 +1,78 @@
+"""模型接入：厂商、模型、连通测试与用量。厂商与模型全平台共用，系统管理员管理，所有空间的成员都能用（不按人授权）。
+
+装配入口：
+- build_models_service(sessionmaker, authorizer, master_key) -> ModelsService；
+- api.build_router(...) 挂公开应用；gateway.model_gateway.build_router(..., resolver=catalog, http=...) 挂内部应用；
+- usage.usage_from_event 把宿主 assistant/message 事件转成 UsageEntry，交给 UsageRecorder.record；
+- client.ModelClient：业务服务与 worker 自己调模型（嵌入、重排、看图），给扩展用；worker 里没有管理权限，
+  用 catalog_for_worker 建一个只能取路由的目录；独立的模型网关进程用 catalog_for_gateway（带快照缓存）。
+"""
+
+from dataclasses import dataclass
+
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from .client import ModelCallError, ModelClient, Slots
+from .core import Authorizer
+from .crypto import SecretBox
+from .recorder import DEFAULT_TIMEZONE, GroupBy, UsageRecorder, UsageSummary
+from .schemas import Route
+from .service import ModelCatalog
+from .tables import MODELS_RLS_TABLES, MODELS_TABLES
+from .usage import TurnCallBudget, UsageContext, UsageEntry, model_from_header, usage_from_event
+
+
+@dataclass(frozen=True)
+class ModelsService:
+    catalog: ModelCatalog
+    recorder: UsageRecorder
+
+
+class _NoAdmin:
+    """worker 进程不管理模型，只取路由：任何管理判定都不成立。"""
+
+    def check(self, user_id: str, workspace_id: str, resource: str, action: str) -> bool:
+        return False
+
+    def is_system_admin(self, user_id: str) -> bool:
+        return False
+
+
+def catalog_for_worker(sessionmaker: async_sessionmaker, master_key: str) -> ModelCatalog:
+    """不缓存：管理员在业务服务里改了模型，worker 看不到那边的作废，后台任务每次都按库里的取。"""
+    return ModelCatalog(sessionmaker, _NoAdmin(), SecretBox.from_master_key(master_key), cache_ttl=0)
+
+
+def catalog_for_gateway(sessionmaker: async_sessionmaker, master_key: str) -> ModelCatalog:
+    """独立的模型网关进程用：只取路由、读快照。业务服务那边改了模型，这边看不到作废，最多过一个 TTL（10 秒）生效。"""
+    return ModelCatalog(sessionmaker, _NoAdmin(), SecretBox.from_master_key(master_key))
+
+
+def build_models_service(sessionmaker: async_sessionmaker, authorizer: Authorizer, master_key: str, *,
+                         timezone: str = DEFAULT_TIMEZONE) -> ModelsService:
+    catalog = ModelCatalog(sessionmaker, authorizer, SecretBox.from_master_key(master_key))
+    return ModelsService(catalog=catalog,
+                         recorder=UsageRecorder(sessionmaker, timezone=timezone, prices=catalog.price_of))
+
+
+__all__ = [
+    "MODELS_RLS_TABLES",
+    "MODELS_TABLES",
+    "GroupBy",
+    "ModelCallError",
+    "ModelCatalog",
+    "ModelClient",
+    "ModelsService",
+    "Route",
+    "Slots",
+    "TurnCallBudget",
+    "UsageContext",
+    "UsageEntry",
+    "UsageRecorder",
+    "UsageSummary",
+    "build_models_service",
+    "catalog_for_gateway",
+    "catalog_for_worker",
+    "model_from_header",
+    "usage_from_event",
+]

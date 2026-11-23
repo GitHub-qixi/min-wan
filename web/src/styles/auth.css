@@ -1,0 +1,104 @@
+/* 登录、邀请注册、初始化向导共用的居中卡片。 */
+.kw-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--kw-sidebar-bg);
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.kw-login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--kw-content-bg);
+  border: 1px solid var(--kw-border-secondary);
+  border-radius: var(--kw-radius-card-lg);
+  padding: 32px;
+  box-sizing: border-box;
+}
+
+.kw-login-brand {
+  margin-bottom: 20px;
+}
+
+.kw-login-card h1 {
+  margin: 0 0 4px;
+  font-size: var(--kw-font-title);
+  font-weight: 600;
+}
+
+.kw-login-card p {
+  margin: 0 0 24px;
+  color: var(--kw-text-secondary);
+}
+
+.kw-login-error {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-secondary);
+  color: var(--color-text);
+  font-size: var(--font-text-sm-size);
+}
+
+/* 工作邮箱 / 域账号的切换，在表单上方 */
+.kw-login-switch {
+  margin-bottom: 16px;
+}
+
+/* 登录方式按钮（单点登录、企业微信等），可能有好几个，竖排 */
+.kw-login-methods {
+  display: grid;
+  gap: 8px;
+}
+
+.kw-login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-text-xs-size);
+}
+
+.kw-login-divider::before,
+.kw-login-divider::after {
+  flex: 1;
+  height: 1px;
+  background: var(--color-border-subtle);
+  content: '';
+}
+
+/* 应用登录确认页：设备、账号两行事实，下面「拒绝 / 允许」并排 */
+.kw-consent-facts {
+  margin: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-consent-facts > div {
+  display: flex;
+  gap: 12px;
+}
+
+.kw-consent-facts dt {
+  flex: none;
+  width: 40px;
+  color: var(--color-text-secondary);
+}
+
+.kw-consent-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kw-consent-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}

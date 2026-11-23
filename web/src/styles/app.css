@@ -1,0 +1,449 @@
+/*
+ * 全局与外壳（侧栏）样式。颜色、圆角、字号一律取 tokens.css 与组件库的 CSS 变量，不写字面量。
+ * 各区域的样式分在 chat.css、preview.css、admin.css、auth.css。
+ */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--kw-content-bg);
+  color: var(--kw-text);
+}
+
+.kw-root {
+  height: 100%;
+}
+
+/* 自己写的可点元素（侧栏链接、树节点、步骤行）的键盘焦点框。放在 base 层，组件库按钮、输入框有自己的聚焦样式，以它们为准 */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--kw-link);
+    outline-offset: 2px;
+  }
+}
+
+/* ---------- 布局 ---------- */
+/*
+ * 整页从不滚动，只有页面里该滚的那一层滚（2026-10-23 实测文档页「一直往下拖整页被顶歪」）：
+ * - position: relative：外壳里的绝对定位元素（组件库开关里给读屏的 sr-only 文字等）以外壳为包含块、被它裁掉。
+ *   原来它们一路往上找不到定位祖先，挂在页面根上，一屏分块就把页面撑到三千多像素，分块列表滚到底以后
+ *   浏览器把多出来的滚动交给页面根，整个外壳被顶上去、底下露出一片空白；
+ * - clip 而不是 hidden：hidden 的元素用户滚不动、脚本却能滚，预览里 scrollIntoView 把高亮滚进视野时会把
+ *   所有上级一起滚。clip 不是滚动容器，只有真正该滚的那一层会动。
+ */
+.kw-shell {
+  position: relative;
+  display: flex;
+  height: 100vh;
+  overflow: clip;
+}
+
+.kw-sidebar {
+  width: var(--kw-sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--kw-sidebar-bg);
+  padding: 12px 8px;
+  box-sizing: border-box;
+}
+
+/* 品牌标识：默认是叶子 K 当首字母的 KnowWork 字样；自定义时是图标加名称 */
+.kw-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kw-brand-mark {
+  display: block;
+  flex: none;
+  object-fit: contain;
+}
+
+.kw-brand-name {
+  overflow: hidden;
+  color: var(--kw-text);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 默认字样：叶子 K 当首字母；颜色同商标图（深色 #1d2433、K 和 Work 晴空蓝） */
+.kw-wordmark {
+  align-items: baseline;
+  gap: 0;
+  color: #1d2433;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.kw-wordmark-k {
+  position: relative;
+  /* 比大写字母（约 0.72em）高一截、底边略低于基线：叶子 K 笔画细、中间有空，和粗体字母一样高时显得小，
+     主角被后面又宽又重的 W 抢走（2026-10-21 用户反馈） */
+  top: 0.04em;
+  display: block;
+  flex: none;
+  height: 0.86em;
+  margin-right: 0.04em;
+}
+
+.kw-brand-accent {
+  color: var(--kw-link);
+}
+
+.kw-sidebar-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 8px 12px;
+}
+
+.kw-sidebar-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 搜索对话（照 ChatGPT）：顶上输入框，下面一列结果，按时间分组；选中的一行浅灰底，命中处加粗 */
+.kw-search-dialog .kw-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kw-search-dialog .kw-dialog-close {
+  top: 18px;
+}
+
+.kw-search-dialog input {
+  padding-right: 32px;
+}
+
+.kw-search-results,
+.kw-search-results ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kw-search-results {
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+}
+
+.kw-search-group {
+  padding: 12px 10px 4px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-text-xs-size);
+}
+
+.kw-search-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+}
+
+.kw-search-row > svg {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--color-text-secondary);
+}
+
+.kw-search-row.is-active {
+  background: var(--color-surface-secondary);
+}
+
+.kw-search-row-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.kw-search-row-title,
+.kw-search-row-snippet {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kw-search-row-snippet {
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-search-hit {
+  font-weight: var(--font-weight-semibold);
+}
+
+.kw-search-empty {
+  margin: 0;
+  padding: 16px 10px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+/* 收起：只有图标的窄栏（照 ChatGPT），宽度变化带一点过渡 */
+.kw-sidebar {
+  transition: width 160ms ease;
+}
+
+.kw-sidebar.is-collapsed {
+  width: 60px;
+  padding: 12px 10px;
+  align-items: center;
+  gap: 4px;
+}
+
+.kw-sidebar.is-collapsed .kw-sidebar-link {
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.kw-sidebar.is-collapsed .kw-sidebar-link > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.kw-sidebar.is-collapsed .kw-sidebar-footer {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.kw-sidebar-spacer {
+  flex: 1;
+}
+
+/* 窄栏顶上：产品图标，悬停换成「展开侧栏」图标 */
+.kw-sidebar-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 8px;
+  border: none;
+  border-radius: var(--kw-radius-control);
+  background: transparent;
+  color: var(--kw-text-secondary);
+  cursor: pointer;
+}
+
+.kw-sidebar-open:hover {
+  background: var(--kw-hover-bg);
+}
+
+.kw-sidebar-open-mark {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.kw-sidebar-open-icon {
+  display: none;
+  width: 20px;
+  height: 20px;
+}
+
+.kw-sidebar-open:hover .kw-sidebar-open-mark,
+.kw-sidebar-open:focus-visible .kw-sidebar-open-mark {
+  display: none;
+}
+
+.kw-sidebar-open:hover .kw-sidebar-open-icon,
+.kw-sidebar-open:focus-visible .kw-sidebar-open-icon {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kw-sidebar {
+    transition: none;
+  }
+}
+
+/* 管理后台侧栏顶部：品牌加一个「管理后台」小标签 */
+.kw-admin-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 12px;
+}
+
+.kw-admin-brand-tag {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-tertiary);
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+.kw-sidebar-section {
+  margin-top: 16px;
+}
+
+.kw-sidebar-label {
+  padding: 0 12px 4px;
+  font-size: var(--kw-font-xs);
+  color: var(--kw-text-secondary);
+}
+
+.kw-sidebar-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.kw-sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--kw-radius-control);
+  background: transparent;
+  color: var(--kw-text);
+  font-size: var(--kw-font-base);
+  text-align: left;
+  cursor: pointer;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
+.kw-sidebar-link:hover,
+.kw-sidebar-link.is-active {
+  background: var(--kw-hover-bg);
+  color: var(--kw-text);
+}
+
+.kw-sidebar-link .kw-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kw-sidebar-empty {
+  padding: 4px 12px;
+  font-size: var(--kw-font-sm);
+  color: var(--kw-text-secondary);
+}
+
+.kw-sidebar-footer {
+  border-top: 1px solid var(--kw-border-secondary);
+  padding-top: 8px;
+}
+
+.kw-user-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.kw-user-meta small {
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+.kw-main {
+  flex: 1;
+  min-width: 0;
+  background: var(--kw-content-bg);
+  overflow: clip;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 菜单项右侧的当前值（用户菜单里的「回答语言  中文」） */
+.kw-menu-with-value {
+  display: inline-flex;
+  flex: 1;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.kw-menu-value {
+  color: var(--kw-text-secondary);
+}
+
+/* ---------- 侧栏会话项 ---------- */
+.kw-conversation-item {
+  position: relative;
+}
+
+.kw-conversation-item .kw-sidebar-link {
+  padding-right: 36px;
+}
+
+/* IM 机器人里私聊来的对话：标题后面的平台小字（「企业微信」） */
+.kw-conversation-source {
+  flex-shrink: 0;
+  margin-left: 6px;
+  color: var(--kw-text-tertiary, var(--kw-text-secondary));
+  font-size: 12px;
+}
+
+.kw-conversation-item .kw-conversation-more {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+
+.kw-conversation-item:hover .kw-conversation-more,
+.kw-conversation-item .kw-conversation-more:focus-visible,
+.kw-conversation-item .kw-conversation-more[data-state='open'] {
+  opacity: 1;
+}
+
+/* 菜单里的删除这类操作用危险色（ChatGPT 会话菜单的「删除」同款） */
+.kw-menu-danger {
+  color: var(--color-text-danger);
+}
+
+.kw-sidebar-skeleton {
+  padding: 4px 12px;
+}
+
+.kw-sidebar-more {
+  margin: 4px 0 0 4px;
+}
+
+/* 整页的加载、无权限、出错：在内容区居中 */
+.kw-page-state {
+  padding: 48px 24px;
+}
+
+/* 管理后台侧栏菜单右侧的待处理数（技能待审核） */
+.kw-sidebar-count {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--color-surface-tertiary);
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-xs-size);
+  line-height: 18px;
+  text-align: center;
+}

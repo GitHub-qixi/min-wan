@@ -1,0 +1,434 @@
+name: release
+
+# 打 v* 标签发布：构建镜像推到阿里云容器镜像服务，同步 postgres、redis、rustfs，生成 SBOM 并建 GitHub Release。
+# 只在公开仓库 knowflow-ai/KnowWork 里跑：开源镜像只从公开仓库的代码构建。
+#
+# 增量：每个镜像按自己的构建输入（Dockerfile 复制进去的路径，见 IMAGE_INPUTS）和上一个版本标签比，
+# 没变的不重新构建，把上一版直接打上这一版的标签；依赖镜像已经同步过的跳过。改版本号会改 server、runtime-host、
+# web 的版本字段，所以这三个每次都会重建，省下的主要是最大的沙箱镜像。
+# 每个构建出来的镜像带标签 io.knowwork.inputs（构建输入的指纹，git 树对象哈希算出来的，两个仓库里同样的文件算出来一样），
+# 别的构建以这些镜像为底座时，可以据此核对底座和自己手上的代码是不是同一份。
+#
+# 需要的配置：
+#   变量 ACR_REGISTRY   crpi-6q638zy09wmnj70w.cn-hangzhou.personal.cr.aliyuncs.com/knowflow-ai（与 KnowFlow 同一个阿里云个人版实例，命名空间 knowflow-ai；地址加命名空间，与 deploy/.env.example 一致）
+#   新仓库第一次推送时自动创建、默认私有，要在阿里云控制台改成公开，用户才能不登录直接拉取
+#   密钥 ACR_USERNAME、ACR_PASSWORD   阿里云容器镜像服务的登录账号与固定密码
+#
+# 出哪几个架构看 .github/release-arches（默认只有 amd64，要 ARM 服务器用时加 arm64）。每个架构在自己的原生构建机上构建
+# （公开仓库的 ARM 构建机免费，不用 QEMU 模拟，沙箱镜像装 LibreOffice 模拟起来很慢），先推带架构后缀的标签 vX.Y.Z-amd64
+# （、vX.Y.Z-arm64），再合成标签 vX.Y.Z 与 latest：有几个架构，客户的机器都按自己的架构自动拉到对应的那个，部署文件不分两套。
+# 上一版的镜像缺这一版要的架构就不复用、照常重建；依赖镜像同样按这几个架构同步。
+#
+# 昇腾 NPU 上的 MinerU（knowwork-mineru-ascend，可选部署，deploy/docker-compose.mineru-ascend.yml）单独一个任务：只出 ARM64
+# （官方昇腾适配要求鲲鹏 CPU，和 release-arches 无关），有自己的版本号（写在那份编排里），这个版本推过就跳过。
+# 第一次推送后同样要在阿里云控制台把 knowwork-mineru-ascend 改成公开。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布的版本（与 VERSION 一致，例如 v0.0.1）
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # 与 deploy/docker-compose.yml 里 postgres、redis、rustfs 的默认镜像一致；改版本时两处一起改（下面有检查）
+  MIRRORS: >-
+    docker.io/library/postgres:17.6-alpine=postgres:17.6-alpine
+    docker.io/library/redis:7.4.2-alpine=redis:7.4.2-alpine
+    docker.io/rustfs/rustfs:1.0.0-beta.7=rustfs-rustfs:1.0.0-beta.7
+  # 每个镜像的构建输入：Dockerfile 复制进去的路径，加上 .dockerignore。改 Dockerfile 的 COPY 时同步改这里
+  IMAGE_INPUTS: |
+    server=.dockerignore deploy/docker/server.Dockerfile server/pyproject.toml server/uv.lock server/src
+    runtime-host=.dockerignore deploy/docker/runtime-host.Dockerfile runtime-host/package.json runtime-host/package-lock.json runtime-host/profile runtime-host/plugins deploy/runtime-host
+    gateway=.dockerignore deploy/docker/gateway.Dockerfile web deploy/gateway
+    sandbox=.dockerignore deploy/docker/sandbox.Dockerfile runtime-host/plugins/dsh-host/skills/resources/office
+    office=.dockerignore deploy/docker/office.Dockerfile deploy/docker/office
+
+jobs:
+  check:
+    name: 发布前检查
+    if: github.repository == 'knowflow-ai/KnowWork' && vars.ACR_REGISTRY != ''
+    runs-on: ubuntu-24.04
+    outputs:
+      arches: ${{ steps.arches.outputs.json }}   # ["amd64"] 或 ["amd64","arm64"]，构建时按它展开
+      arch_list: ${{ steps.arches.outputs.list }}   # amd64 或 amd64,arm64（排好序），核对用
+      build: ${{ steps.plan.outputs.build }}
+      reuse: ${{ steps.plan.outputs.reuse }}
+      previous: ${{ steps.plan.outputs.previous }}
+    steps:
+      # 手动触发时默认检出的是触发分支，要明确检出这次发布的标签
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0  # 要和上一个版本标签比
+      - name: 标签与 VERSION 一致
+        run: |
+          test "$(cat VERSION)" = "$TAG" || { echo "标签 $TAG 与 VERSION（$(cat VERSION)）不一致"; exit 1; }
+          grep -q "KNOWWORK_VERSION=$TAG" deploy/.env.example || { echo "deploy/.env.example 的版本不是 $TAG，先跑 scripts/bump_version.py"; exit 1; }
+      - name: 这一版出哪几个架构（.github/release-arches）
+        id: arches
+        run: |
+          list="$(grep -v '^[[:space:]]*#' .github/release-arches | tr ', \t' '\n\n\n' | grep -v '^$' | sort -u | paste -sd, -)"
+          case ",$list," in *,amd64,*) ;; *) echo "release-arches 里要有 amd64（现在是 ${list:-空的}）"; exit 1 ;; esac
+          for arch in ${list//,/ }; do
+            case "$arch" in amd64|arm64) ;; *) echo "release-arches 里的 $arch 不认得：只能写 amd64、arm64"; exit 1 ;; esac
+          done
+          echo "这一版的架构：$list"
+          { echo "list=$list"; echo "json=$(printf '%s' "$list" | jq -Rc 'split(",")')"; } >> "$GITHUB_OUTPUT"
+      - name: 同步列表与 compose 默认值一致
+        run: |
+          for pair in $MIRRORS; do
+            target="${pair#*=}"
+            grep -q "/$target}" deploy/docker-compose.yml || { echo "docker-compose.yml 里没有 $target，同步列表过期了"; exit 1; }
+          done
+      - uses: docker/setup-buildx-action@v3
+      - name: 哪些镜像要重建
+        id: plan
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ARCHES: ${{ steps.arches.outputs.json }}
+        run: |
+          previous="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+          # 上一版的镜像有这一版要的全部架构才复用（公开镜像，不登录就能看清单；多出来的架构不碍事）；看不到也按没有处理，照常重建
+          has_arches() {
+            docker buildx imagetools inspect --raw "$1" 2>/dev/null \
+              | jq -e --argjson want "$ARCHES" '[.manifests[]?.platform.architecture] as $have | all($want[]; . as $a | $have | index($a) != null)' > /dev/null
+          }
+          build=(); reuse=()
+          while IFS='=' read -r name paths; do
+            [ -n "$name" ] || continue
+            # shellcheck disable=SC2086  # paths 是空格分开的路径列表
+            if [ -n "$previous" ] && git diff --quiet "$previous" "$TAG" -- $paths \
+              && has_arches "$ACR_REGISTRY/knowwork-$name:$previous"; then reuse+=("$name"); else build+=("$name"); fi
+          done <<< "$IMAGE_INPUTS"
+          as_json() { printf '%s\n' "$@" | jq -R . | jq -cs 'map(select(length > 0))'; }
+          echo "上一个版本：${previous:-无}；重建：${build[*]:-无}；复用：${reuse[*]:-无}"
+          {
+            echo "previous=$previous"
+            echo "build=$(as_json "${build[@]}")"
+            echo "reuse=$(as_json "${reuse[@]}")"
+          } >> "$GITHUB_OUTPUT"
+      - name: 本版说明（取 CHANGELOG 里这一节）
+        run: |
+          awk -v tag="$TAG" '$0 ~ "^## \\[?" tag "\\]?" {found=1; next} found && /^## / {exit} found {print}' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md 里没有 $TAG 这一节"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  images:
+    name: 镜像 ${{ matrix.name }}（${{ matrix.arch }}）
+    needs: check
+    if: needs.check.outputs.build != '[]'
+    # 各架构在自己的原生构建机上构建
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    env:
+      # build-push-action 默认把构建记录（*.dockerbuild）也传成产物，发布任务一并下载时解包会失败；用不上，关掉
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.check.outputs.build) }}
+        arch: ${{ fromJSON(needs.check.outputs.arches) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: docker/setup-buildx-action@v3
+      - name: 取仓库主机名（ACR_REGISTRY 带命名空间，登录只要主机）
+        run: echo "REGISTRY_HOST=${ACR_REGISTRY%%/*}" >> "$GITHUB_ENV"
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      - name: 构建输入的指纹
+        run: |
+          paths="$(printf '%s\n' "$IMAGE_INPUTS" | sed -n "s/^${{ matrix.name }}=//p")"
+          # shellcheck disable=SC2086
+          echo "INPUTS_FINGERPRINT=$(for p in $paths; do git rev-parse "HEAD:$p"; done | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+      - name: 登录阿里云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      # Office 镜像要编 GenOffice（依赖、Electron、Rust 编译产物），构建机自带的磁盘不够：删掉用不上的工具链腾出二十多 GB
+      - name: 腾磁盘（Office 镜像）
+        if: matrix.name == 'office'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h /
+      - name: 构建并推送（带架构后缀的标签，合成 vX.Y.Z 在下一步）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.name }}.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          # 阿里云个人版不认 buildx 默认附带的来源证明（OCI 空配置清单），推送会报 unknown manifest class；
+          # 关掉它，推普通的镜像清单。依赖与许可证清单由合成那一步单独生成的 SBOM 提供
+          provenance: false
+          sbom: false
+          build-args: KNOWWORK_VERSION=${{ env.TAG }}
+          labels: |
+            org.opencontainers.image.version=${{ env.TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            io.knowwork.inputs=${{ env.INPUTS_FINGERPRINT }}
+          tags: ${{ vars.ACR_REGISTRY }}/knowwork-${{ matrix.name }}:${{ env.TAG }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
+          # Office 镜像不写缓存：编 GenOffice 的中间层有好几 GB，会把仓库的缓存配额挤掉；它的输入没变时整个镜像复用上一版
+          cache-to: ${{ matrix.name != 'office' && format('type=gha,mode=max,scope={0}-{1}', matrix.name, matrix.arch) || '' }}
+
+  manifests:
+    name: 合成标签 ${{ matrix.name }}
+    needs: [check, images]
+    if: needs.check.outputs.build != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.check.outputs.build) }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: 取仓库主机名（ACR_REGISTRY 带命名空间，登录只要主机）
+        run: echo "REGISTRY_HOST=${ACR_REGISTRY%%/*}" >> "$GITHUB_ENV"
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      - name: 登录阿里云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: 各架构合成 vX.Y.Z 与 latest（在仓库里写清单，不传镜像层）
+        env:
+          ARCH_LIST: ${{ needs.check.outputs.arch_list }}
+        run: |
+          image="${{ vars.ACR_REGISTRY }}/knowwork-${{ matrix.name }}"
+          sources=(); for arch in ${ARCH_LIST//,/ }; do sources+=("$image:$TAG-$arch"); done
+          docker buildx imagetools create --tag "$image:$TAG" --tag "$image:latest" "${sources[@]}"
+          arches="$(docker buildx imagetools inspect --raw "$image:$TAG" | jq -r '[.manifests[].platform.architecture] | sort | join(",")')"
+          test "$arches" = "$ARCH_LIST" || { echo "$image:$TAG 的架构是 $arches，应该是 $ARCH_LIST"; exit 1; }
+          echo "$image:$TAG：$arches"
+      - name: 生成 SBOM（依赖与许可证清单，取 amd64 那份）
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ vars.ACR_REGISTRY }}/knowwork-${{ matrix.name }}:${{ env.TAG }}-amd64
+          registry-username: ${{ secrets.ACR_USERNAME }}
+          registry-password: ${{ secrets.ACR_PASSWORD }}
+          format: spdx-json
+          output-file: knowwork-${{ matrix.name }}-${{ env.TAG }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: knowwork-${{ matrix.name }}-${{ env.TAG }}.spdx.json
+
+  reuse:
+    name: 复用上一版 ${{ matrix.name }}
+    needs: check
+    if: needs.check.outputs.reuse != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.check.outputs.reuse) }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: 取仓库主机名（ACR_REGISTRY 带命名空间，登录只要主机）
+        run: echo "REGISTRY_HOST=${ACR_REGISTRY%%/*}" >> "$GITHUB_ENV"
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      - name: 登录阿里云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: 把上一版打上这一版的标签（在仓库里复制清单，不重新构建、不传镜像层）
+        run: |
+          image="${{ vars.ACR_REGISTRY }}/knowwork-${{ matrix.name }}"
+          docker buildx imagetools create --tag "$image:$TAG" --tag "$image:latest" "$image:${{ needs.check.outputs.previous }}"
+          echo "构建输入和 ${{ needs.check.outputs.previous }} 一样：$image:$TAG 复用了上一版"
+      - name: 生成 SBOM（依赖与许可证清单）
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ vars.ACR_REGISTRY }}/knowwork-${{ matrix.name }}:${{ env.TAG }}
+          registry-username: ${{ secrets.ACR_USERNAME }}
+          registry-password: ${{ secrets.ACR_PASSWORD }}
+          format: spdx-json
+          output-file: knowwork-${{ matrix.name }}-${{ env.TAG }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: knowwork-${{ matrix.name }}-${{ env.TAG }}.spdx.json
+
+  mineru-ascend:
+    name: 昇腾 MinerU 镜像
+    needs: check
+    # 镜像解开约 24 GB、推送约 11 GB（底座是昇腾的 vLLM 镜像），在 ARM 构建机上原生构建；构建完先冒烟再推，冒烟不过不推
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: 取仓库主机名（ACR_REGISTRY 带命名空间，登录只要主机）
+        run: echo "REGISTRY_HOST=${ACR_REGISTRY%%/*}" >> "$GITHUB_ENV"
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      - name: 登录阿里云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: 这个版本推过就跳过；Dockerfile 改了版本号没改就停下
+        id: prior
+        run: |
+          compose=deploy/docker-compose.mineru-ascend.yml
+          dockerfile=deploy/docker/mineru-ascend.Dockerfile
+          # 版本号只写在编排里一处：部署拉哪个版本，这里就构建哪个；它以 MinerU 的版本开头，免得两处对不上
+          version="$(grep -o 'knowwork-mineru-ascend:[0-9][0-9A-Za-z.-]*' "$compose" | head -1 | cut -d: -f2)"
+          [ -n "$version" ] || { echo "::error::$compose 里找不到 knowwork-mineru-ascend 的版本号"; exit 1; }
+          mineru="$(sed -n 's/^ARG MINERU_VERSION=//p' "$dockerfile")"
+          case "$version" in
+            "$mineru"-*) ;;
+            *) echo "::error::镜像版本 $version 要以 Dockerfile 里的 MinerU 版本 $mineru 开头"; exit 1 ;;
+          esac
+          inputs="$(git rev-parse "HEAD:$dockerfile" | cut -c1-16)"
+          image="${{ vars.ACR_REGISTRY }}/knowwork-mineru-ascend:$version"
+          { echo "image=$image"; echo "version=$version"; echo "inputs=$inputs"; } >> "$GITHUB_OUTPUT"
+          if config="$(docker buildx imagetools inspect "$image" --format '{{json .Image}}' 2>/dev/null)"; then
+            # 单架构是一份配置，多架构是按平台的一组
+            theirs="$(printf '%s' "$config" \
+              | jq -r '[if has("config") then . else .[] end | .config.Labels["io.knowwork.inputs"] // empty] | first // empty')"
+            if [ "$theirs" = "$inputs" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$image 已经是这份 Dockerfile 构建的，跳过"
+              exit 0
+            fi
+            # 同一个版本号不覆盖：已经部署的客户拉到的会悄悄变成另一份
+            echo "::error::$image 已经有了，但不是这份 Dockerfile 构建的（那份 ${theirs:-没有指纹}，这次 $inputs）：改了 Dockerfile 要在 $compose 里升版本号（例如 $version-r2）"
+            exit 1
+          fi
+      - name: 腾磁盘（底座解开十几 GB，构建机自带的工具链用不上）
+        if: steps.prior.outputs.skip != 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/share/powershell || true
+          docker system prune -af > /dev/null
+          df -h /
+      - name: 构建
+        if: steps.prior.outputs.skip != 'true'
+        env:
+          IMAGE: ${{ steps.prior.outputs.image }}
+        run: |
+          docker build --file deploy/docker/mineru-ascend.Dockerfile \
+            --label "org.opencontainers.image.version=${{ steps.prior.outputs.version }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "io.knowwork.inputs=${{ steps.prior.outputs.inputs }}" \
+            --tag "$IMAGE" .
+          docker image inspect --format '{{.Size}}' "$IMAGE" | awk '{printf "镜像解开后 %.1f GB\n", $1 / 1e9}'
+          df -h /
+      - name: 冒烟（没有 NPU：模型在不在、接口起不起得来、CPU 上解析一页 PDF）
+        if: steps.prior.outputs.skip != 'true'
+        run: .github/scripts/mineru-ascend-smoke.sh "${{ steps.prior.outputs.image }}"
+      - name: 推送（断了重试，已经传上去的层不重传）
+        if: steps.prior.outputs.skip != 'true'
+        env:
+          IMAGE: ${{ steps.prior.outputs.image }}
+        run: |
+          for attempt in 1 2 3; do
+            docker push "$IMAGE" && exit 0
+            echo "第 $attempt 次推送失败，30 秒后重试"
+            sleep 30
+          done
+          exit 1
+
+  mirrors:
+    name: 同步依赖镜像
+    needs: check
+    runs-on: ubuntu-24.04
+    env:
+      ARCHES: ${{ needs.check.outputs.arches }}
+      ARCH_LIST: ${{ needs.check.outputs.arch_list }}
+    # 跨仓库复制镜像挂住过半个多小时；不设超时会一直等到默认的 6 小时
+    timeout-minutes: 30
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: 取仓库主机名（ACR_REGISTRY 带命名空间，登录只要主机）
+        run: echo "REGISTRY_HOST=${ACR_REGISTRY%%/*}" >> "$GITHUB_ENV"
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      - name: 登录阿里云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: 原样复制这一版要的架构（都有了的跳过）
+        run: |
+          has_arches() {
+            docker buildx imagetools inspect --raw "$1" 2>/dev/null \
+              | jq -e --argjson want "$ARCHES" '[.manifests[]?.platform.architecture] as $have | all($want[]; . as $a | $have | index($a) != null)' > /dev/null
+          }
+          for pair in $MIRRORS; do
+            source="${pair%%=*}"; target="${{ vars.ACR_REGISTRY }}/${pair#*=}"
+            if has_arches "$target"; then
+              echo "已有 $target（$ARCH_LIST），跳过"
+              continue
+            fi
+            # 每个要的架构各取一份；以前少同步了架构的标签在这里重写，已有架构那份的摘要不变，在用的部署不受影响
+            digests="$(docker buildx imagetools inspect --raw "$source" \
+              | jq -r --argjson want "$ARCHES" '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture as $a | $want | index($a) != null))]
+                       | unique_by(.platform.architecture) | .[].digest')"
+            [ "$(printf '%s\n' "$digests" | grep -c .)" = "$(printf '%s' "$ARCHES" | jq length)" ] || { echo "$source 缺架构（要 $ARCH_LIST）"; exit 1; }
+            # shellcheck disable=SC2046  # 每个摘要一个参数
+            docker buildx imagetools create --tag "$target" $(printf '%s\n' "$digests" | sed "s|^|${source%%:*}@|")
+            echo "已同步 $source → $target"
+          done
+
+  release:
+    name: GitHub Release
+    needs: [check, images, manifests, reuse, mirrors, mineru-ascend]
+    # images（连同 manifests）、reuse 有一个可能因为没有要做的而跳过，跳过不算失败；检查没过或任何一步失败都不建 Release
+    if: >-
+      always() && needs.check.result == 'success' && needs.mirrors.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-24.04
+    steps:
+      # 只取发布说明与 SBOM，不碰其他产物
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sbom-*
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: KnowWork ${{ env.TAG }}
+          body_path: artifacts/notes.md
+          files: artifacts/*.spdx.json

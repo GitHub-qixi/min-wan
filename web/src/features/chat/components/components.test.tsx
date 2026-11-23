@@ -1,0 +1,866 @@
+import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '../../../test/user';
+import { jsonResponse, renderWithApp, routeFetch } from '../../../test/render';
+import { register } from '../../../slots/registry';
+import { ApprovalCard } from './ApprovalCard';
+import { AnswerActions } from './AnswerActions';
+import { AssistantTurn } from './AssistantTurn';
+import { Composer } from './Composer';
+import { useComposerInbox } from '../editRequest';
+import { DeliverableCards, FileCard } from './FileCard';
+import { FileLinks, Markdown } from './Markdown';
+import { ProcessSummary } from './ProcessSummary';
+import type { ApprovalView, RunView } from '../events/types';
+
+const endedTurn: RunView = {
+  runId: 'run-1',
+  status: 'completed',
+  startedAt: 0,
+  endedAt: 38_000,
+  notes: ['我先读取文件'],
+  thinking: ['想一想'],
+  answer: '答',
+  problems: ['部分执行过程没有记录下来'],
+  asked: [],
+  trail: [
+    { type: 'thinking', text: '想一想' },
+    { type: 'note', text: '我先读取文件' },
+    { type: 'step', callId: 'c1' },
+    { type: 'step', callId: 'c2' },
+  ],
+  steps: [
+    {
+      callId: 'c1',
+      kind: 'tool',
+      name: 'read_file',
+      arguments: '{"path":"a.txt"}',
+      status: 'done',
+      startedAt: 0,
+      endedAt: 2000,
+      resultPreview: '内容',
+    },
+    { callId: 'c2', kind: 'tool', name: 'web', arguments: '', status: 'error', errorReason: '网络不可用' },
+  ],
+};
+
+describe('ProcessSummary', () => {
+  it('默认收起成一行摘要，点开按先后列出思考、说明与每一步', async () => {
+    renderWithApp(<ProcessSummary run={endedTurn} />);
+    const toggle = screen.getByRole('button', { name: /已完成 2 个步骤 · 用时 38 秒/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('read_file')).not.toBeInTheDocument();
+    expect(screen.queryByText('想一想')).toBeNull();
+    await userEvent.click(toggle);
+    expect(screen.getByText('想一想')).toBeInTheDocument();
+    expect(screen.getByText('我先读取文件')).toBeInTheDocument();
+    expect(screen.getByText('read_file')).toBeInTheDocument();
+    expect(screen.getByText('path: a.txt')).toBeInTheDocument();
+    expect(screen.getByText(/网络不可用/)).toBeInTheDocument();
+    expect(screen.getByText('部分执行过程没有记录下来')).toBeInTheDocument();
+    const texts = [...document.querySelectorAll('.kw-step-text')].map((el) => el.textContent);
+    expect(texts).toEqual(['想一想', '我先读取文件']);
+  });
+
+  it('步骤用人话标题，参数与结果默认收起，点开在代码框里看（JSON 格式化）', async () => {
+    const run: RunView = {
+      ...endedTurn,
+      trail: [{ type: 'step', callId: 'k1' }],
+      steps: [
+        {
+          callId: 'k1',
+          kind: 'tool',
+          name: 'knowledge_search',
+          arguments: '{"query":"微短剧 代表作品"}',
+          status: 'done',
+          startedAt: 0,
+          endedAt: 15_000,
+          resultPreview: '{"results":[{"ref":1}]}',
+        },
+      ],
+    };
+    renderWithApp(<ProcessSummary run={run} />);
+    await userEvent.click(screen.getByRole('button', { name: /已完成/ }));
+    expect(screen.getByText('检索知识库')).toBeInTheDocument();
+    expect(screen.getByText('微短剧 代表作品')).toBeInTheDocument();
+    expect(screen.getByText('15 秒')).toBeInTheDocument();
+    expect(screen.queryByText('结果')).toBeNull();
+    await userEvent.click(screen.getByText('检索知识库'));
+    expect(await screen.findByText('结果')).toBeInTheDocument();
+    expect(document.querySelector('.kw-step-code pre')?.textContent).toContain('"query": "微短剧 代表作品"');
+  });
+
+  it('只有思考没有步骤时写「已思考」，点开看完整的思考', async () => {
+    renderWithApp(
+      <ProcessSummary
+        run={{
+          ...endedTurn,
+          steps: [],
+          notes: [],
+          problems: [],
+          trail: [{ type: 'thinking', text: '想一想' }],
+        }}
+      />,
+    );
+    const toggle = screen.getByRole('button', { name: /已思考 · 用时 38 秒/ });
+    expect(screen.queryByText('想一想')).toBeNull();
+    await userEvent.click(toggle);
+    expect(screen.getByText('想一想')).toBeInTheDocument();
+  });
+
+  it('边想边在摘要下面显示思考，开始写正文或点开后不再重复显示', async () => {
+    const thinking: RunView = {
+      ...endedTurn,
+      endedAt: undefined,
+      status: 'running',
+      steps: [],
+      notes: [],
+      problems: [],
+      thinking: [],
+      trail: [],
+    };
+    const first = renderWithApp(<ProcessSummary run={thinking} thinking="先看看去年的数据" />);
+    expect(screen.getByText('思考中')).toBeInTheDocument();
+    expect(document.querySelector('.kw-thinking-preview')?.textContent).toBe('先看看去年的数据');
+    await userEvent.click(screen.getByRole('button', { name: /思考中/ }));
+    expect(document.querySelector('.kw-thinking-preview')).toBeNull();
+    expect(document.querySelector('.kw-process-body')?.textContent).toContain('先看看去年的数据');
+    first.unmount();
+    renderWithApp(<ProcessSummary run={thinking} thinking="先看看去年的数据" answering />);
+    expect(document.querySelector('.kw-thinking-preview')).toBeNull();
+  });
+
+  it('运行中显示当前步骤', () => {
+    renderWithApp(
+      <ProcessSummary
+        run={{
+          ...endedTurn,
+          endedAt: undefined,
+          steps: [{ callId: 'c', kind: 'tool', name: 'bash', arguments: '', status: 'running' }],
+        }}
+      />,
+    );
+    expect(screen.getByText('正在运行命令')).toBeInTheDocument();
+  });
+});
+
+describe('ApprovalCard', () => {
+  const approval: ApprovalView = {
+    id: 'ap1',
+    toolName: 'write_file',
+    status: 'pending',
+    reason: '要写入报告文件',
+  };
+
+  it('说明工具与目标；勾「本会话内同类操作不再询问」再批准会带上记住，拒绝不带', async () => {
+    const onDecide = vi.fn(async () => undefined);
+    renderWithApp(
+      <ApprovalCard
+        approval={approval}
+        step={{
+          callId: 'c',
+          kind: 'tool',
+          name: 'write_file',
+          arguments: '{"path":"报告.docx"}',
+          status: 'awaiting-approval',
+        }}
+        onDecide={onDecide}
+      />,
+    );
+    expect(screen.getByText('要写入报告文件')).toBeInTheDocument();
+    expect(screen.getByText('工具：write_file · 目标：path: 报告.docx')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('checkbox', { name: '本会话内同类操作不再询问' }));
+    await userEvent.click(screen.getByRole('button', { name: '批准' }));
+    expect(onDecide).toHaveBeenCalledWith(true, true);
+    await waitFor(() => expect(screen.getByRole('button', { name: '拒绝' })).toBeEnabled());
+    await userEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    expect(onDecide).toHaveBeenLastCalledWith(false, false);
+  });
+
+  it('执行的一方记不住授权时不给「不再询问」，批准只带一次性的', async () => {
+    const onDecide = vi.fn(async () => undefined);
+    renderWithApp(<ApprovalCard approval={approval} onDecide={onDecide} rememberable={false} />);
+    expect(screen.queryByRole('checkbox', { name: '本会话内同类操作不再询问' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '批准' }));
+    expect(onDecide).toHaveBeenCalledWith(true, false);
+  });
+
+  it('扩展工具登记了审批明细的，参数摘要换成它画的明细（拿到解析后的参数）', () => {
+    register('chat.tools', {
+      name: 'model_change',
+      label: '改模型',
+      approval: ({ arguments: args }) => <p>要改 {String(args.count)} 项</p>,
+    });
+    renderWithApp(
+      <ApprovalCard
+        approval={{ id: 'ap3', toolName: 'model_change', status: 'pending' }}
+        step={{
+          callId: 'c',
+          kind: 'tool',
+          name: 'model_change',
+          arguments: '{"count":2}',
+          status: 'awaiting-approval',
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('要改 2 项')).toBeInTheDocument();
+    expect(screen.getByText('工具：改模型')).toBeInTheDocument();
+  });
+
+  it('MCP 工具在标题与说明里都显示成「服务名 · 工具名」', () => {
+    const name = 'mcp__deepwiki__read_wiki_contents';
+    renderWithApp(
+      <ApprovalCard
+        approval={{ id: 'ap2', toolName: name, status: 'pending', reason: `写入操作「${name}」需要确认` }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('写入操作「deepwiki · read_wiki_contents」需要确认')).toBeInTheDocument();
+    expect(screen.getByText('工具：deepwiki · read_wiki_contents')).toBeInTheDocument();
+  });
+
+  it('已处理的审批收成一行：结果 · 工具 · 目标，不再是卡片', () => {
+    renderWithApp(
+      <ApprovalCard
+        approval={{ ...approval, toolName: 'mcp__deepwiki__read_wiki_structure', status: 'allowed' }}
+        step={{
+          callId: 'c',
+          kind: 'tool',
+          name: 'mcp__deepwiki__read_wiki_structure',
+          arguments: '{"repoName":"Zleap-AI/SAG"}',
+          status: 'done',
+        }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText('已批准 · deepwiki · read_wiki_structure · repoName: Zleap-AI/SAG'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: '需要你批准的操作' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '批准' })).not.toBeInTheDocument();
+  });
+
+  it('按本会话授权自动批准的写明是自动的', () => {
+    renderWithApp(
+      <ApprovalCard
+        approval={{ ...approval, toolName: 'bash', status: 'allowed', auto: true }}
+        onDecide={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('已按本会话授权自动批准 · 运行命令')).toBeInTheDocument();
+  });
+});
+
+describe('Composer', () => {
+  it('来源给了 dropFiles：拖进来的文件写成 @路径插在光标处，不当附件；写不成的提示', async () => {
+    const dropFiles = vi.fn(async () => ({
+      mentions: ['@数据/汇总.xlsx', '@"/data/共享/报 价.pdf"'],
+      skipped: ['/x/"q".txt'],
+    }));
+    const onSend = vi.fn(async () => undefined);
+    renderWithApp(<Composer running={false} onSend={onSend} dropFiles={dropFiles} />);
+    const input = screen.getByRole('textbox');
+    await userEvent.type(input, '对比');
+    const file = new File(['x'], '汇总.xlsx');
+    fireEvent.drop(input.closest('.kw-composer-box') as HTMLElement, { dataTransfer: { files: [file] } });
+    await waitFor(() => expect(input).toHaveValue('对比 @数据/汇总.xlsx @"/data/共享/报 价.pdf" '));
+    expect(dropFiles).toHaveBeenCalledWith([file]);
+    expect(screen.getByText('有 1 个没能写成路径（文件不在了，或路径里有引号）')).toBeInTheDocument();
+    expect(screen.queryByText('汇总.xlsx')).not.toBeInTheDocument();
+  });
+
+  it('空内容不发送，回车发送后清空', async () => {
+    const onSend = vi.fn(async () => undefined);
+    renderWithApp(<Composer running={false} onSend={onSend} />);
+    const input = screen.getByRole('textbox');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByText('请输入内容')).toBeInTheDocument());
+    expect(onSend).not.toHaveBeenCalled();
+    await userEvent.type(input, '你好');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('你好', 'followup', [], []));
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(screen.getByText('回答可能有误，重要结论请点开出处核对')).toBeInTheDocument();
+  });
+
+  it('编辑器交来的一句：输入框空着就直接发；有草稿就接在后面等用户发；别的对话的不认', async () => {
+    const onSend = vi.fn(async () => undefined);
+    renderWithApp(<Composer running={false} onSend={onSend} conversationId="c_1" />);
+    const input = screen.getByRole('textbox');
+    act(() => useComposerInbox.getState().offer('c_2', '别的对话', true));
+    expect(onSend).not.toHaveBeenCalled();
+    act(() => useComposerInbox.getState().offer('c_1', '在编辑器里修改 @a.docx：改简洁些', true));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith('在编辑器里修改 @a.docx：改简洁些', 'followup', [], []),
+    );
+    expect(input).toHaveValue('');
+
+    await userEvent.type(input, '先看第二节');
+    act(() => useComposerInbox.getState().offer('c_1', '在编辑器里修改 @a.docx：统一语气', true));
+    await waitFor(() => expect(input).toHaveValue('先看第二节\n\n在编辑器里修改 @a.docx：统一语气'));
+    expect(onSend).toHaveBeenCalledTimes(1);
+    act(() => useComposerInbox.getState().offer('c_1', '再补一句', false));
+    await waitFor(() =>
+      expect(input).toHaveValue('先看第二节\n\n在编辑器里修改 @a.docx：统一语气\n\n再补一句'),
+    );
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('运行中 Ctrl+回车 补充到当前任务，并能停止', async () => {
+    const onSend = vi.fn(async () => undefined);
+    const onStop = vi.fn(async () => undefined);
+    renderWithApp(<Composer running onSend={onSend} onStop={onStop} />);
+    const input = screen.getByRole('textbox');
+    await userEvent.type(input, '再加一点');
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('再加一点', 'steer', [], []));
+    expect(screen.getByText(/Ctrl\/⌘ \+ 回车：补充到当前任务/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '停止' }));
+    expect(onStop).toHaveBeenCalled();
+  });
+
+  it('附件：选文件后马上传上去、显示在输入框上方，可以移除（服务端那份也删），随消息发出后清空；超过 20 MiB 的不加入', async () => {
+    let uploaded = 0;
+    const { calls, fetchMock } = routeFetch({
+      'POST /api/workspaces/default/attachments': () => {
+        uploaded += 1;
+        return jsonResponse({
+          items: [{ id: `att_${uploaded}`, filename: 'x', size: 4, status: 'staged' }],
+          failures: [],
+        });
+      },
+      'DELETE /api/workspaces/default/attachments/*': new Response(null, { status: 204 }),
+      'GET /api/workspaces/default/conversations/mention-options': jsonResponse({ bases: [], services: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onSend = vi.fn(async () => undefined);
+    renderWithApp(<Composer running={false} onSend={onSend} />);
+    const contract = new File(['合同正文'], '合同.docx');
+    const sheet = new File(['1,2'], '明细.csv');
+    const huge = new File(['x'], '录像.mp4');
+    Object.defineProperty(huge, 'size', { value: 21 * 1024 * 1024 });
+    fireEvent.change(screen.getByLabelText('选择文件'), { target: { files: [contract, sheet, huge] } });
+    expect(await screen.findByText('录像.mp4 超过 20 MiB，没有加入')).toBeInTheDocument();
+    const rail = screen.getByRole('list', { name: '待发送的附件' });
+    expect(within(rail).getByText('合同.docx')).toBeInTheDocument();
+    await waitFor(() => expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2));
+    await waitFor(() => expect(within(rail).queryByText('上传中')).not.toBeInTheDocument());
+    await userEvent.click(within(rail).getByRole('button', { name: '移除 明细.csv' }));
+    expect(within(rail).queryByText('明细.csv')).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.some((c) => c.method === 'DELETE')).toBe(true));
+    await userEvent.type(screen.getByRole('textbox'), '改一下付款条款');
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+    const deleted = calls.find((c) => c.method === 'DELETE')?.path ?? '';
+    const kept = deleted.endsWith('att_1') ? 'att_2' : 'att_1';
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        '改一下付款条款',
+        'followup',
+        [{ id: kept, name: '合同.docx', size: contract.size }],
+        [],
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole('list', { name: '待发送的附件' })).not.toBeInTheDocument());
+    vi.unstubAllGlobals();
+  });
+
+  it('还在上传时就移除了：等它传上去，服务端那份马上删掉', async () => {
+    let release: () => void = () => undefined;
+    const uploaded = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { calls, fetchMock } = routeFetch({
+      'POST /api/workspaces/default/attachments': async () => {
+        await uploaded;
+        return jsonResponse({
+          items: [{ id: 'att_7', filename: 'a.txt', size: 1, status: 'staged' }],
+          failures: [],
+        });
+      },
+      'DELETE /api/workspaces/default/attachments/*': new Response(null, { status: 204 }),
+      'GET /api/workspaces/default/conversations/mention-options': jsonResponse({ bases: [], services: [] }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderWithApp(<Composer running={false} onSend={vi.fn(async () => undefined)} />);
+    fireEvent.change(screen.getByLabelText('选择文件'), { target: { files: [new File(['a'], 'a.txt')] } });
+    const rail = screen.getByRole('list', { name: '待发送的附件' });
+    expect(within(rail).getByText('上传中')).toBeInTheDocument();
+    await userEvent.click(within(rail).getByRole('button', { name: '移除 a.txt' }));
+    release();
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === 'DELETE' && c.path.endsWith('/att_7'))).toBe(true),
+    );
+    vi.unstubAllGlobals();
+  });
+
+  it('发送失败时保留内容并提示', async () => {
+    const onSend = vi.fn(async () => Promise.reject(new Error('上一条消息还在处理，请稍后再试')));
+    renderWithApp(<Composer running={false} onSend={onSend} />);
+    const input = screen.getByRole('textbox');
+    await userEvent.type(input, '你好');
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(screen.getByText('上一条消息还在处理，请稍后再试')).toBeInTheDocument());
+    expect(input).toHaveValue('你好');
+  });
+});
+
+describe('逐字输出', () => {
+  it('正在输出的文字接在已有回答后面显示，没结束时不出操作按钮', () => {
+    const running: RunView = {
+      ...endedTurn,
+      status: 'running',
+      endedAt: undefined,
+      endReason: undefined,
+      answer: '先说结论。',
+    };
+    renderWithApp(
+      <AssistantTurn
+        run={running}
+        approvals={[]}
+        questions={[]}
+        onDecide={vi.fn()}
+        onAnswer={vi.fn()}
+        busy
+        liveText="短剧规模继续增长"
+      />,
+    );
+    expect(screen.getByText('先说结论。')).toBeInTheDocument();
+    expect(screen.getByText('短剧规模继续增长')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '复制' })).toBeNull();
+  });
+});
+
+describe('Markdown 与引用', () => {
+  it('引用渲染成上标，点开看出处', async () => {
+    renderWithApp(
+      <Markdown
+        text="结论成立[ID:1]，参见[文档](https://example.com)"
+        sources={{ 1: { title: '员工手册', excerpt: '第三条' } }}
+      />,
+    );
+    const cite = screen.getByRole('button', { name: '查看出处 1' });
+    await userEvent.click(cite);
+    expect(await screen.findByText('员工手册')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '文档' })).toHaveAttribute('target', '_blank');
+  });
+
+  it('表格里的引用照样渲染成上标：单元格前面的竖线不能带进链接，否则表格把链接切断、露出原文', () => {
+    const text =
+      '| 项目 | 内容 |\n| --- | --- |\n| 产品 | KnowFlow 企业知识库 [21] |\n| 定位 | 私有化知识库平台[22] |';
+    const { container } = renderWithApp(
+      <Markdown text={text} sources={{ 21: { title: '产品说明' }, 22: { title: '产品说明' } }} />,
+    );
+    expect(screen.getByRole('button', { name: '查看出处 21' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '查看出处 22' })).toBeInTheDocument();
+    expect(container.textContent).not.toContain('kw-cite');
+    expect(container.querySelectorAll('td')).toHaveLength(4);
+  });
+
+  it('冒号后面紧跟英文的写法照原文显示（组件库开着的指令语法不能把它吞掉）；表格套一层、宽了能横向滚动', () => {
+    const text =
+      '口径:company_count 按 key:value 分组\n\n::note[单独一行]\n\n| 列 | 值 |\n| --- | --: |\n| a | 1 |';
+    const { container } = renderWithApp(<Markdown text={text} />);
+    expect(container).toHaveTextContent('口径:company_count 按 key:value 分组');
+    expect(container).toHaveTextContent('::note[单独一行]');
+    expect(container.querySelector('.kw-markdown-table > table')).not.toBeNull();
+  });
+
+  it('回答里的图按出处换成图片，放在它说明的那句话后面；对不上或出处还没拉到时不显示', () => {
+    const text = '报销分三步[1]。\n\n[IMG:1:0]\n\n[IMG:1:5]\n\n[IMG:2:0]';
+    const { container, rerender } = renderWithApp(
+      <Markdown
+        text={text}
+        sources={{
+          1: { title: '差旅办法', images: [{ url: '/api/x/img1?sig=s', caption: '报销流程图' }] },
+        }}
+      />,
+    );
+    const image = screen.getByRole('img', { name: '报销流程图' });
+    expect(image).toHaveAttribute('src', '/api/x/img1?sig=s');
+    expect(image.closest('a')).toBeNull();
+    expect(container.querySelectorAll('img')).toHaveLength(1);
+    expect(container.textContent).not.toContain('IMG');
+    rerender(<Markdown text={text} />);
+    expect(container.querySelectorAll('img')).toHaveLength(0);
+  });
+
+  it('点图在看图层里放大，带图注；Esc 关掉，不跳新标签页', async () => {
+    renderWithApp(
+      <Markdown
+        text="见下图[1]。\n\n[IMG:1:0]"
+        sources={{ 1: { title: '差旅办法', images: [{ url: '/api/x/img1?sig=s', caption: '报销流程图' }] } }}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: '放大查看：报销流程图' }));
+    const viewer = await screen.findByRole('dialog', { name: '报销流程图' });
+    expect(within(viewer).getByRole('img', { name: '报销流程图' })).toHaveAttribute(
+      'src',
+      '/api/x/img1?sig=s',
+    );
+    expect(within(viewer).getByText('报销流程图', { selector: 'figcaption' })).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('回答过程中重新渲染、重新拉出处，图不重建（不重新加载、不闪）', () => {
+    const text = '报销分三步[1]。\n\n[IMG:1:0]';
+    const sources = () => ({
+      1: { title: '差旅办法', images: [{ url: '/api/x/img1?sig=s', caption: '报销流程图' }] },
+    });
+    // 不用 renderWithApp：它的 rerender 会连外层 Provider 一起换掉，整棵树都会重挂
+    const { rerender } = render(<Markdown text={text} sources={sources()} />);
+    const image = screen.getByRole('img', { name: '报销流程图' });
+    rerender(<Markdown text={`${text}\n\n审批后报销。`} sources={sources()} />);
+    expect(screen.getByRole('img', { name: '报销流程图' })).toBe(image);
+  });
+
+  it('知识源给了版本提示时，出处卡片上照原样显示', async () => {
+    renderWithApp(
+      <Markdown
+        text="住宿每晚不超过 500 元[1]"
+        sources={{
+          1: { title: '差旅管理办法2023版', versionNote: '可能已有新版《差旅管理办法（2025版）》（待确认）' },
+        }}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: '查看出处 1' }));
+    expect(await screen.findByText('可能已有新版《差旅管理办法（2025版）》（待确认）')).toBeInTheDocument();
+  });
+
+  it('没有出处数据时说明暂不可用，不渲染原始 HTML', async () => {
+    const { container } = renderWithApp(<Markdown text={'<script>x</script>\n\n见[^2]'} />);
+    expect(container.querySelector('script')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '查看出处 2' }));
+    expect(await screen.findByText('出处原文暂不可用')).toBeInTheDocument();
+  });
+});
+
+describe('引用出处与无效编号', () => {
+  it('回答里原样摘了原文才收窄到那一处（摘录、页码跟着换）；改写过的照样是整块', async () => {
+    const source = {
+      title: 'F-CM324C',
+      page: 11,
+      excerpt: '说明 若想设置左右摆头以本体为中心时……',
+      spots: [
+        { locate: { type: 'pdf' as const, page: 11, boxes: [], quotes: ['说明'] }, quote: '说明' },
+        {
+          locate: { type: 'pdf' as const, page: 12, boxes: [], quotes: ['注意 可动部位不可把手指伸入。'] },
+          quote: '注意 可动部位不可把手指伸入。',
+        },
+      ],
+    };
+    renderWithApp(
+      <Markdown
+        text="手动调节时，可动部位不要把手指伸入[3]。说明书写着「注意：可动部位不可把手指伸入」[4]。"
+        sources={{ 3: source, 4: source }}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: '查看出处 3' }));
+    expect(await screen.findByText('说明 若想设置左右摆头以本体为中心时……')).toBeInTheDocument();
+    expect(screen.getByText('第 11 页')).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: '查看出处 4' }));
+    expect(await screen.findByText('注意 可动部位不可把手指伸入。')).toBeInTheDocument();
+    expect(screen.getByText('第 12 页')).toBeInTheDocument();
+  });
+
+  it('[n] 渲染成上标，点开显示标题、页码、摘录与查看原文', async () => {
+    renderWithApp(
+      <Markdown
+        text="付款期限 30 天[1][2]。"
+        sources={{
+          1: {
+            title: '采购合同.pdf',
+            page: 3,
+            excerpt: '乙方应在 30 天内付款',
+            url: 'https://kf/doc?page=3',
+          },
+          2: { title: '补充协议.docx' },
+        }}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: '查看出处 1' }));
+    expect(await screen.findByText('采购合同.pdf')).toBeInTheDocument();
+    expect(screen.getByText('第 3 页')).toBeInTheDocument();
+    expect(screen.getByText('乙方应在 30 天内付款')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '查看原文' })).toHaveAttribute('href', 'https://kf/doc?page=3');
+    expect(screen.getByRole('button', { name: '查看出处 2' })).toBeInTheDocument();
+  });
+
+  it('引用目录拉到后，目录里没有的编号不显示，回答下方说明去掉了哪些', () => {
+    const run: RunView = { ...endedTurn, answer: '期限 30 天[1]，违约金 5%[7]。' };
+    renderWithApp(
+      <AssistantTurn
+        run={run}
+        approvals={[]}
+        questions={[]}
+        sources={{ 1: { title: '采购合同.pdf' } }}
+        onDecide={vi.fn()}
+        onAnswer={vi.fn(async () => true)}
+        busy={false}
+      />,
+    );
+    expect(screen.getByRole('button', { name: '查看出处 1' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '查看出处 7' })).toBeNull();
+    expect(screen.getByText('已去掉 1 处没有出处的引用编号：[7]')).toBeInTheDocument();
+  });
+
+  it('回答结束后图标行末尾有来源按钮，答到一半时没有', () => {
+    const sources = {
+      1: { title: '采购合同.pdf', url: 'http://kf/1' },
+      2: { title: '采购合同.pdf', url: 'http://kf/1' },
+    };
+    const props = {
+      approvals: [],
+      questions: [],
+      artifacts: [],
+      sources,
+      onDecide: vi.fn(),
+      onAnswer: vi.fn(async () => true),
+      busy: false,
+    };
+    const { unmount } = renderWithApp(
+      <AssistantTurn {...props} run={{ ...endedTurn, endedAt: undefined, answer: '期限 30 天[1]' }} />,
+    );
+    expect(screen.queryByRole('button', { name: /个来源/ })).toBeNull();
+    unmount();
+    renderWithApp(<AssistantTurn {...props} run={{ ...endedTurn, answer: '期限 30 天[1]，违约金[2]。' }} />);
+    expect(screen.getByRole('button', { name: '1 个来源' })).toBeInTheDocument();
+  });
+
+  it('引用目录还没拉到时编号照常显示，不提示', () => {
+    const run: RunView = { ...endedTurn, answer: '见[7]。' };
+    renderWithApp(
+      <AssistantTurn
+        run={run}
+        approvals={[]}
+        questions={[]}
+        onDecide={vi.fn()}
+        onAnswer={vi.fn(async () => true)}
+        busy={false}
+      />,
+    );
+    expect(screen.getByRole('button', { name: '查看出处 7' })).toBeInTheDocument();
+    expect(screen.queryByText(/已去掉/)).toBeNull();
+  });
+});
+
+describe('FileCard 与 AnswerActions', () => {
+  it('文件卡片：文件名，下面一行是说明（去掉末尾括号里的补充），没写说明就写类型', async () => {
+    const onSave = vi.fn();
+    renderWithApp(<FileCard name="周报.docx" description="本周进展（初稿）" onSave={onSave} />);
+    expect(screen.getByText('本周进展')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '下载 周报.docx' }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    renderWithApp(<FileCard name="流程图.png" />);
+    expect(screen.getByText('图片')).toBeInTheDocument();
+    renderWithApp(<FileCard name="页.html" />);
+    expect(screen.getByText('网页')).toBeInTheDocument();
+  });
+
+  it('点卡片本身打开预览，图片也是卡片、不直接显示图；不能预览的类型卡片点不了，只能下载', async () => {
+    const onPreview = vi.fn();
+    renderWithApp(<FileCard name="流程图.png" onPreview={onPreview} onSave={() => undefined} />);
+    expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.getByText('在右侧预览')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '预览 流程图.png' }));
+    expect(onPreview).toHaveBeenCalledTimes(1);
+    renderWithApp(<FileCard name="包.zip" onPreview={onPreview} onSave={() => undefined} />);
+    expect(screen.queryByRole('button', { name: '预览 包.zip' })).toBeNull();
+    expect(screen.getByRole('button', { name: '下载 包.zip' })).toBeEnabled();
+  });
+
+  it('这里打不开（别的电脑上看本机会话）：卡片只展示，下载不可用', () => {
+    renderWithApp(<FileCard name="x.png" />);
+    expect(screen.getByRole('button', { name: '下载 x.png' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '预览 x.png' })).toBeNull();
+  });
+
+  it('一个文件占满一行，多个排两列；超过四个先收起，「全部 N 个文件」展开、「收起」收回；点开交给这段对话的文件', async () => {
+    const opener = { open: vi.fn(), save: vi.fn() };
+    const { container } = renderWithApp(
+      <FileLinks opener={opener}>
+        <DeliverableCards files={[{ path: '/sessions/c1/a.md' }]} />
+      </FileLinks>,
+    );
+    expect(container.querySelector('.kw-file-grid')).toHaveAttribute('data-single', 'true');
+    const many = ['1.md', '2.md', '3.md', '4.md', '5.md', '6.md'].map((name) => ({
+      path: `/sessions/c1/${name}`,
+    }));
+    renderWithApp(
+      <FileLinks opener={opener}>
+        <DeliverableCards files={many} />
+      </FileLinks>,
+    );
+    const list = screen.getAllByRole('list', { name: '交付的文件' }).at(-1) as HTMLElement;
+    expect(within(list).getAllByRole('listitem')).toHaveLength(4);
+    await userEvent.click(screen.getByRole('button', { name: '展开全部 6 个交付文件' }));
+    expect(within(list).getAllByRole('listitem')).toHaveLength(6);
+    await userEvent.click(within(list).getByRole('button', { name: '预览 6.md' }));
+    expect(opener.open).toHaveBeenCalledWith({ path: '/sessions/c1/6.md' });
+    await userEvent.click(within(list).getByRole('button', { name: '下载 6.md' }));
+    expect(opener.save).toHaveBeenCalledWith('/sessions/c1/6.md');
+    await userEvent.click(screen.getByRole('button', { name: '收起交付文件列表' }));
+    expect(within(list).getAllByRole('listitem')).toHaveLength(4);
+    expect(screen.getByText('全部 6 个文件')).toBeInTheDocument();
+  });
+
+  it('外壳给了原生拖出（桌面端）：移上去就准备（读出原件、按类型起名），起拖交给外壳；移开没拖就释放；没有外壳不能拖', async () => {
+    const read = vi.fn(async () => new TextEncoder().encode('pdf').buffer as ArrayBuffer);
+    const fileDrag = {
+      prepare: vi.fn(async () => 'handle-1'),
+      cancel: vi.fn(),
+      start: vi.fn(async () => true),
+      release: vi.fn(),
+    };
+    const opener = { open: vi.fn(), read };
+    const plain = renderWithApp(
+      <FileLinks opener={opener}>
+        <DeliverableCards files={[{ path: '/sessions/c1/季度报告.pdf' }]} />
+      </FileLinks>,
+    );
+    expect(plain.container.querySelector('.kw-file-card')).not.toHaveAttribute('draggable');
+    plain.unmount();
+
+    (window as { knowworkShell?: unknown }).knowworkShell = { fileDrag };
+    try {
+      const { container } = renderWithApp(
+        <FileLinks opener={opener}>
+          <DeliverableCards files={[{ path: '/sessions/c1/季度报告.pdf' }]} />
+        </FileLinks>,
+      );
+      const card = container.querySelector('.kw-file-card') as HTMLElement;
+      expect(card).toHaveAttribute('draggable', 'true');
+      fireEvent.pointerEnter(card);
+      await waitFor(() => expect(fileDrag.prepare).toHaveBeenCalled());
+      expect(read).toHaveBeenCalledWith('/sessions/c1/季度报告.pdf');
+      const [source, requestId] = fileDrag.prepare.mock.calls[0] as unknown as [
+        { bytes: Uint8Array; kind: string; mediaType: string; name: string },
+        string,
+      ];
+      expect(source).toMatchObject({ kind: 'bytes', mediaType: 'application/pdf', name: '季度报告.pdf' });
+      expect(new TextDecoder().decode(source.bytes)).toBe('pdf');
+      expect(typeof requestId).toBe('string');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fireEvent.dragStart(card);
+      expect(fileDrag.start).toHaveBeenCalledWith('handle-1');
+      fireEvent.pointerLeave(card);
+      expect(fileDrag.release).not.toHaveBeenCalled();
+
+      fireEvent.pointerEnter(card);
+      await waitFor(() => expect(fileDrag.prepare).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fireEvent.pointerLeave(card);
+      expect(fileDrag.release).toHaveBeenCalledWith('handle-1');
+    } finally {
+      delete (window as { knowworkShell?: unknown }).knowworkShell;
+    }
+  });
+
+  it('复制回答时去掉图片编号（复制出去换不成图）', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    renderWithApp(<AnswerActions text={'报销分三步[1]。\n\n[IMG:1:0]\n\n先填单。'} onRegenerate={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: '复制' }));
+    expect(writeText).toHaveBeenCalledWith('报销分三步[1]。\n\n先填单。');
+  });
+
+  it('复制与重新生成；没给反馈的处理时不显示赞、踩', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const onRegenerate = vi.fn();
+    renderWithApp(<AnswerActions text="答案" onRegenerate={onRegenerate} />);
+    await userEvent.click(screen.getByRole('button', { name: '复制' }));
+    expect(writeText).toHaveBeenCalledWith('答案');
+    expect(screen.queryByRole('button', { name: '有帮助' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '重新生成' }));
+    expect(onRegenerate).toHaveBeenCalled();
+  });
+
+  it('赞、踩照 DSH 官方：点了打开反馈弹窗，提交后才记下；再点已选的直接撤回', async () => {
+    const onFeedback = vi.fn(async () => true);
+    const onRetract = vi.fn(async () => true);
+    const { rerender } = renderWithApp(
+      <AnswerActions text="答案" feedback={null} onFeedback={onFeedback} onRetract={onRetract} />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: '没帮助' }));
+    const dialog = await screen.findByRole('dialog', { name: '这条回答哪里不好' });
+    expect(onFeedback).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('radio', { name: '任务结果' }));
+    await userEvent.type(within(dialog).getByLabelText('说明'), '没答到点子上');
+    await userEvent.click(within(dialog).getByRole('button', { name: '提交' }));
+    expect(onFeedback).toHaveBeenCalledWith({
+      rating: 'dislike',
+      category: 'task-result',
+      note: '没答到点子上',
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    rerender(<AnswerActions text="答案" feedback="dislike" onFeedback={onFeedback} onRetract={onRetract} />);
+    expect(screen.getByRole('button', { name: '没帮助' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByRole('button', { name: '没帮助' }));
+    expect(onRetract).toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('复制失败时提示', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+      configurable: true,
+    });
+    renderWithApp(<AnswerActions text="答案" />);
+    await userEvent.click(screen.getByRole('button', { name: '复制' }));
+    expect(await screen.findByText('复制没有成功，请手动选中文字复制')).toBeInTheDocument();
+  });
+
+  it('运行详情入口：有正文时排在最后；这一轮没有正文（例如失败了）时只留它', async () => {
+    const onInspect = vi.fn();
+    const { unmount } = renderWithApp(<AnswerActions text="答案" onInspect={onInspect} />);
+    await userEvent.click(screen.getByRole('button', { name: '运行详情' }));
+    expect(onInspect).toHaveBeenCalledTimes(1);
+    unmount();
+    renderWithApp(<AnswerActions text="" onRegenerate={() => undefined} onInspect={onInspect} />);
+    expect(screen.getByRole('button', { name: '运行详情' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '复制' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重新生成' })).not.toBeInTheDocument();
+  });
+});
+
+describe('回答下方的说明', () => {
+  it('扩展工具登记了 notice 时，回答下方一行说明色小字，带去管理的链接', () => {
+    register('chat.tools', {
+      name: 'remember_note',
+      label: '记住',
+      notice: ({ arguments: args }) => ({
+        text: `已记住：${String(args.content)}`,
+        link: { label: '管理记忆', to: '/settings?tab=memory' },
+      }),
+    });
+    const run: RunView = {
+      ...endedTurn,
+      steps: [
+        {
+          callId: 'm1',
+          kind: 'tool',
+          name: 'remember_note',
+          arguments: '{"action":"add","content":"以后回答都用表格"}',
+          status: 'done',
+          resultPreview: '已记住 [1]：以后回答都用表格',
+        },
+      ],
+    };
+    renderWithApp(
+      <AssistantTurn
+        run={run}
+        approvals={[]}
+        questions={[]}
+        onDecide={vi.fn()}
+        onAnswer={vi.fn(async () => true)}
+        busy={false}
+      />,
+    );
+    expect(screen.getByText('已记住：以后回答都用表格')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '管理记忆' })).toHaveAttribute('href', '/settings?tab=memory');
+  });
+});

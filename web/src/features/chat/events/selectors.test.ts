@@ -1,0 +1,131 @@
+import { describe, expect, it } from 'vitest';
+import { ev } from './fixtures';
+import { chatReducer, initialChatState, reduceWire } from './reducer';
+import {
+  formatDuration,
+  hasProcess,
+  selectAwaitingReply,
+  selectRunSearch,
+  summarizeProcess,
+} from './selectors';
+import type { RunView, StepView } from './types';
+
+const run = (patch: Partial<RunView> = {}): RunView => ({
+  runId: 'run-1',
+  status: 'running',
+  steps: [],
+  notes: [],
+  thinking: [],
+  answer: '',
+  problems: [],
+  asked: [],
+  trail: [],
+  ...patch,
+});
+
+const step = (status: StepView['status'], name = 'read_file'): StepView => ({
+  callId: `${name}-${status}`,
+  kind: 'tool',
+  name,
+  arguments: '',
+  status,
+});
+
+describe('formatDuration', () => {
+  it.each([
+    [0, '0 秒'],
+    [38_000, '38 秒'],
+    [120_000, '2 分钟'],
+    [125_400, '2 分 5 秒'],
+    [-5, '0 秒'],
+  ])('%i ms → %s', (ms, value) => expect(formatDuration(ms)).toBe(value));
+});
+
+describe('summarizeProcess', () => {
+  it('结束后显示步骤数与用时', () => {
+    const done = run({
+      startedAt: 0,
+      endedAt: 38_000,
+      steps: [step('done'), step('done', 'b'), step('error', 'c'), step('done', 'd')],
+    });
+    expect(summarizeProcess(done)).toBe('已完成 4 个步骤 · 用时 38 秒');
+    expect(summarizeProcess(run({ endedAt: 5 }))).toBe('已完成');
+  });
+
+  it('运行中显示当前步骤', () => {
+    expect(summarizeProcess(run())).toBe('思考中');
+    expect(summarizeProcess(run({ steps: [step('done'), step('running', 'web_search')] }))).toBe(
+      '正在执行：web_search',
+    );
+    expect(summarizeProcess(run({ steps: [step('awaiting-approval', 'write')] }))).toBe('等待批准：write');
+  });
+
+  it('模型还在写工具的参数（工具没开始跑）时说它在做什么，不是一直「思考中」', () => {
+    expect(summarizeProcess(run(), ['write'])).toBe('正在写入文件');
+    expect(summarizeProcess(run(), ['web_search'])).toBe('正在执行：web_search');
+    expect(summarizeProcess(run({ steps: [step('running', 'read')] }), ['write'])).toBe('正在读取文件');
+  });
+
+  it('模型在写待办、提问这类内部工具时不露工具名（它们本来就不算步骤），仍是「思考中」', () => {
+    expect(summarizeProcess(run(), ['todo_write'])).toBe('思考中');
+    expect(summarizeProcess(run(), ['write', 'ask_user_question'])).toBe('正在写入文件');
+  });
+
+  it('hasProcess：运行中或有细节时显示', () => {
+    expect(hasProcess(run())).toBe(true);
+    expect(hasProcess(run({ endedAt: 1 }))).toBe(false);
+    expect(hasProcess(run({ endedAt: 1, notes: ['x'] }))).toBe(true);
+    expect(hasProcess(run({ endedAt: 1, problems: ['x'] }))).toBe(true);
+    expect(hasProcess(run({ endedAt: 1, thinking: ['想'] }))).toBe(true);
+  });
+
+  it('只有思考没有步骤时写「已思考」', () => {
+    expect(summarizeProcess(run({ startedAt: 0, endedAt: 12_000, thinking: ['想'] }))).toBe(
+      '已思考 · 用时 12 秒',
+    );
+  });
+});
+
+describe('selectRunSearch', () => {
+  const searched = (callId: string, documents: string[], conditions: string[], removed: string[] = []) => ({
+    ...step('done', 'knowledge_search'),
+    callId,
+    search: { documents, conditions, removed },
+  });
+
+  it('合并这一轮各次检索的条件与文档，撤掉的不算用上的', () => {
+    const view = run({
+      steps: [
+        searched('a', ['s:1', 's:2'], ['年度 = 2025', '部门 = 财务部'], ['部门 = 财务部']),
+        searched('b', ['s:2'], ['年度 = 2025', '标签：已签']),
+        step('done'),
+      ],
+    });
+    expect(selectRunSearch(view)).toEqual({
+      conditions: ['年度 = 2025', '标签：已签'],
+      removed: ['部门 = 财务部'],
+      documents: 2,
+    });
+  });
+
+  it('没检索或检索没带条件时没有', () => {
+    expect(selectRunSearch(run({ steps: [step('done')] }))).toBeUndefined();
+    expect(selectRunSearch(run({ steps: [searched('a', ['s:1'], [])] }))).toBeUndefined();
+  });
+});
+
+describe('selectAwaitingReply', () => {
+  it('刚发出、这一轮还没开始时显示「思考中」；这一轮开始、发送失败后不再显示', () => {
+    const sent = chatReducer(initialChatState, {
+      type: 'local/sent',
+      localId: 'l1',
+      text: '你好',
+      mode: 'followup',
+    });
+    expect(selectAwaitingReply(sent)).toBe(true);
+    const delivered = chatReducer(sent, { type: 'local/delivered', localId: 'l1', messageId: 'm1' });
+    expect(selectAwaitingReply(delivered)).toBe(true);
+    expect(selectAwaitingReply(reduceWire(delivered, ev.runStarted(1)))).toBe(false);
+    expect(selectAwaitingReply(chatReducer(sent, { type: 'local/failed', localId: 'l1' }))).toBe(false);
+  });
+});

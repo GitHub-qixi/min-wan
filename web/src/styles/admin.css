@@ -1,0 +1,516 @@
+/* 管理后台与个人设置：页头、工具条、表单布局、部门。 */
+/* ---------- 管理页 ---------- */
+.kw-admin {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.kw-admin-head h1 {
+  margin: 0;
+  font-size: var(--kw-font-title);
+  font-weight: 600;
+}
+
+.kw-admin-head p {
+  margin: 4px 0 16px;
+  color: var(--kw-text-secondary);
+}
+
+.kw-admin-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* MCP 服务的请求头编辑：名字与值并排，值占更宽 */
+.kw-header-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kw-header-row {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.kw-input-narrow {
+  width: 160px;
+}
+
+.kw-detail-note {
+  margin: 12px 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--color-surface-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.kw-ellipsis {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kw-header-current {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+/* 「设置 → 连接」里一个服务的工具清单：一个工具一段，原名加说明 */
+.kw-tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 工具清单的工具列：原名一行，说明一行（超长省略） */
+.kw-tool-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 选择框 + 按钮 + 选项排成一行（按钮是胶囊形，不和输入框拼接） */
+.kw-inline-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.kw-inline-form > .kw-member-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.kw-inline-form + .kw-org-members,
+.kw-inline-form + .kw-table-wrap {
+  margin-top: 12px;
+}
+
+.kw-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 管理页通用 ---------- */
+.kw-admin-toolbar-left,
+.kw-admin-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kw-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+/* 一行并排两个表单项（输入、输出单价） */
+.kw-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.kw-field-row.kw-field-row-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* 左边是类型（窄）、右边是具体对象（宽） */
+.kw-field-row.kw-field-row-narrow {
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.kw-labeled {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kw-labeled-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--kw-text-secondary);
+}
+
+.kw-labeled-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.kw-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.kw-check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kw-settings-account {
+  max-width: 560px;
+}
+
+.kw-secondary-text {
+  color: var(--color-text-secondary);
+}
+
+.kw-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: -8px;
+  white-space: nowrap;
+}
+
+.kw-secondary {
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+.kw-cell-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.kw-cell-stack > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 部门 ---------- */
+.kw-org-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.kw-org-tree {
+  padding: 8px;
+  border: 1px solid var(--kw-border-secondary);
+  border-radius: var(--kw-radius-card);
+}
+
+.kw-org-panel {
+  padding: 16px;
+  border: 1px solid var(--kw-border-secondary);
+  border-radius: var(--kw-radius-card);
+}
+
+.kw-org-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.kw-org-panel-title {
+  margin: 0;
+  font-size: var(--font-text-md-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+.kw-org-members {
+  margin-top: 12px;
+}
+
+.kw-admin-more {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* ---------- 运行面板 ---------- */
+.kw-jobs-section {
+  margin-bottom: 32px;
+}
+
+.kw-jobs-section > h2,
+.kw-jobs-head > h2 {
+  margin: 0 0 12px;
+  font-size: var(--font-text-md-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+.kw-jobs-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.kw-jobs-subhead {
+  margin: 24px 0 8px;
+  font-size: var(--font-text-sm-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* ---------- 模型 → 文档解析 ---------- */
+.kw-field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 12px 0;
+}
+
+.kw-parser-probe {
+  margin: 0 0 12px;
+}
+
+.kw-form-actions {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* ---------- 系统设置 ---------- */
+.kw-system-section {
+  max-width: 640px;
+  margin-bottom: 32px;
+}
+
+.kw-system-section > h2 {
+  margin: 0 0 12px;
+  font-size: var(--font-text-md-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* 效果预览：照侧栏的底色摆一块，看清品牌在侧栏里的样子 */
+.kw-system-preview {
+  display: flex;
+  align-items: center;
+  width: 260px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border-radius: var(--radius-xl);
+  background: var(--kw-sidebar-bg);
+}
+
+.kw-system-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* 保存按钮和输入框对齐：标签一行的高度 */
+.kw-system-row > button {
+  margin-top: 26px;
+}
+
+.kw-system-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.kw-system-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kw-system-logo-preview {
+  width: 48px;
+  height: 48px;
+  padding: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  object-fit: contain;
+}
+
+/* ---------- 问答大盘 ---------- */
+.kw-insights {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  margin-top: 16px;
+  transition: opacity 150ms;
+}
+
+.kw-insights.is-refreshing {
+  opacity: 0.6;
+}
+
+.kw-insights h2 {
+  margin: 0 0 12px;
+  font-size: var(--font-text-md-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* 趋势、工具与知识库两两并排，窄了上下排 */
+.kw-insights-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 24px;
+}
+
+.kw-insights-concerns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kw-insights-concern {
+  display: grid;
+  grid-template-columns: 180px 90px 170px 1fr;
+  gap: 16px;
+  align-items: baseline;
+  padding: 10px 0;
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-insights-concern + .kw-insights-concern {
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.kw-insights-concern-title {
+  color: var(--color-text-secondary);
+}
+
+/* 渠道表的状态格：状态点下面一行灰字写出错原因，长了换行不撑宽表格 */
+.kw-admin-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 技能审核：SKILL.md 正文与逐行对比。加上的行浅绿、删掉的行浅红，其余照常 */
+.kw-skill-text {
+  max-height: 480px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--font-text-sm-size);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.kw-skill-text > div {
+  padding: 0 12px 0 28px;
+  text-indent: -16px;
+}
+
+.kw-skill-text .is-add {
+  background: var(--color-background-success-soft);
+}
+
+.kw-skill-text .is-del {
+  background: var(--color-background-danger-soft);
+  color: var(--color-text-secondary);
+}
+
+/* 详情里一个区块的标题行：标题在左，这一块的操作在右（例如「填写环境变量」） */
+.kw-detail-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* 网页嵌入的「嵌入代码」（features/admin/channels/EmbedCodeSheet.tsx）：每段一个标题、一句说明、可以整段复制的代码 */
+.kw-embed-snippet {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.kw-embed-snippet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kw-embed-snippet h3 {
+  margin: 0;
+  font-size: var(--kw-font-base);
+  font-weight: 600;
+}
+
+.kw-embed-snippet p {
+  margin: 0;
+}
+
+.kw-embed-code {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--kw-border-secondary);
+  border-radius: var(--kw-radius-card);
+  background: var(--color-surface-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.kw-embed-reset {
+  margin-top: 28px;
+}
+
+/* 认证访问的认证密钥（只显示一次）与组对照（一行：接入方的组、用户组、删掉） */
+.kw-embed-secret {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.kw-embed-secret .kw-embed-code {
+  flex: 1;
+}
+
+.kw-group-map {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kw-group-map-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 账号页「已登录的设备」：在账号信息下面隔开一段 */
+.kw-settings-devices {
+  margin-top: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kw-settings-devices h2 {
+  margin: 0;
+  font-size: var(--font-text-md-size);
+  font-weight: 600;
+}

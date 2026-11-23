@@ -1,0 +1,479 @@
+/*
+ * 文件预览抽屉。PDF 阅读器（Word、PPT 也转成 PDF 用它看）：布局照 DSH 官方预览（PdfBody、ZoomViewport、ZoomControls 的样式，MIT），
+ * 颜色与浮层照 ChatGPT。适应宽度时页面不超过 100%；固定比例时页面宽 = 100% 宽 × --document-zoom。
+ */
+.kw-zoom-frame {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  /* clip：只让里面的 scrollport 滚，scrollIntoView 不会把外框一起滚歪（见 app.css 布局一节） */
+  overflow: clip;
+}
+
+.kw-zoom-scrollport {
+  height: 100%;
+  overflow: auto;
+}
+
+.kw-zoom-surface {
+  max-width: none;
+}
+
+.kw-zoom-frame[data-zoom-mode='fit-width'] .kw-zoom-surface {
+  width: min(var(--document-zoom-width), 100%);
+}
+
+.kw-zoom-frame[data-zoom-mode='fixed'] .kw-zoom-surface {
+  width: calc(var(--document-zoom-width) * var(--document-zoom));
+}
+
+.kw-pdf-body {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 12px;
+  background: var(--kw-document-bg);
+}
+
+.kw-zoom-frame[data-zoom-mode='fixed'] .kw-pdf-body {
+  width: max-content;
+}
+
+.kw-pdf-page {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 没画的页按第一页的比例占位（PdfPage 的 ratio）；量不出来时按 A4 */
+.kw-pdf-placeholder {
+  width: 100%;
+  aspect-ratio: 1 / 1.414;
+  background: var(--kw-hover-bg);
+}
+
+.kw-pdf-surface {
+  position: relative;
+  margin-inline: auto;
+  background: var(--kw-content-bg);
+  box-shadow: var(--kw-shadow-page);
+  /* 文字层的混合只和本页画面叠，不透到外面 */
+  isolation: isolate;
+}
+
+.kw-pdf-surface[hidden] {
+  display: none;
+}
+
+.kw-pdf-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.kw-pdf-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-sm);
+}
+
+.kw-pdf-state {
+  padding: 24px;
+}
+
+/*
+ * 文字层：透明文字按原位叠在画面上，让 PDF 里的字能选中、复制。
+ * 排版规则摘自 DSH 官方预览的 PdfBody 样式（其本身取自 pdf.js 的 web/pdf_viewer.css，Apache-2.0）。
+ * 选区照 ChatGPT：用系统默认的选区色（Highlight），和对话里选中文字一样；不透明色加正片叠底，
+ * 画面上的黑字照样看得清，相邻文字块重叠处也不会叠出深一块（半透明色会，2026-10-20 用户反馈不协调）。
+ */
+/* 引用定位的框：叠在画面上、文字层下面，不挡选中；用链接色的浅底（界面规范：产品色只用于链接与可点的引用） */
+.kw-pdf-mark {
+  position: absolute;
+  z-index: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kw-link) 22%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--kw-link) 55%, transparent);
+  pointer-events: none;
+  /* 定位后高亮区的顶端对齐视口顶部，上面留一点边距 */
+  scroll-margin-top: 24px;
+}
+
+.kw-preview-mark {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--kw-link) 22%, transparent);
+  color: inherit;
+}
+
+.kw-pdf-text {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  mix-blend-mode: multiply;
+}
+
+.kw-pdf-text .textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  z-index: 0;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.kw-pdf-text .textLayer[data-main-rotation='90'] {
+  transform: rotate(90deg) translateY(-100%);
+}
+
+.kw-pdf-text .textLayer[data-main-rotation='180'] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+
+.kw-pdf-text .textLayer[data-main-rotation='270'] {
+  transform: rotate(270deg) translate(-100%);
+}
+
+.kw-pdf-text :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+}
+
+.kw-pdf-text .textLayer > :not(.markedContent),
+.kw-pdf-text .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.kw-pdf-text .markedContent {
+  display: contents;
+}
+
+.kw-pdf-text ::selection {
+  background: Highlight;
+  color: transparent;
+}
+
+.kw-pdf-text br::selection {
+  background: transparent;
+}
+
+.kw-pdf-text .textLayer .endOfContent {
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  display: block;
+  cursor: default;
+  user-select: none;
+}
+
+.kw-pdf-text .selecting .endOfContent {
+  top: 0;
+}
+
+/* 缩放控件：底部正中的白色胶囊，平时收起，鼠标靠近底部才浮出（触屏一直显示） */
+.kw-zoom-controls {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--kw-content-bg);
+  border-radius: 9999px;
+  box-shadow: var(--kw-shadow-floating);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 16px) scale(0.98);
+  transition:
+    opacity 0.16s ease-in,
+    transform 0.16s cubic-bezier(0.4, 0, 1, 1);
+}
+
+.kw-zoom-controls-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+  transition:
+    opacity 0.14s ease-out,
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.kw-zoom-percent {
+  min-width: 56px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .kw-zoom-controls {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kw-zoom-controls,
+  .kw-zoom-controls-visible {
+    transition-duration: 0.01ms;
+  }
+}
+
+.kw-preview-text {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--kw-font-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.kw-preview-image {
+  max-width: 100%;
+}
+
+.kw-preview-state {
+  padding: 20px;
+}
+
+/* 嵌在页面里的预览（知识库文档页左栏）：PDF、HTML 自己管滚动，其余在这里滚 */
+.kw-preview-pane {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.kw-preview-pane.is-flush {
+  overflow: clip;
+  padding: 0;
+}
+
+.kw-preview-problem {
+  margin: 0;
+  padding: 20px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+/* 表格预览：照电子表格，列名与行号是浅灰底，细网格线，单元格单行省略 */
+/* 表格自己滚动（表头、行号才能贴住），只渲染可见的行，行高固定为 28px（sheets.ts 的 ROW_HEIGHT） */
+.kw-sheet-scroll {
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.kw-sheet-table tbody tr {
+  height: 28px;
+}
+
+.kw-sheet-table {
+  border-collapse: collapse;
+  font-size: var(--font-text-sm-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.kw-sheet-table th,
+.kw-sheet-table td {
+  max-width: 240px;
+  padding: 4px 8px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kw-sheet-table thead th,
+.kw-sheet-table tbody th {
+  position: sticky;
+  background: var(--color-surface-secondary);
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-xs-size);
+  font-weight: var(--font-weight-medium);
+}
+
+.kw-sheet-table thead th {
+  top: 0;
+  z-index: 1;
+  min-width: 96px;
+}
+
+.kw-sheet-table tbody th {
+  left: 0;
+  text-align: right;
+}
+
+/* 引用定位到的行：底色加深一档，行号用正文色，单色不上彩 */
+.kw-sheet-table tbody tr.is-hit td {
+  background: var(--color-surface-tertiary);
+}
+
+.kw-sheet-table tbody tr.is-hit th {
+  color: var(--color-text);
+}
+
+.kw-sheet-table thead th:first-child {
+  left: 0;
+  z-index: 2;
+  min-width: 40px;
+}
+
+/* HTML 预览铺满抽屉正文（抽屉正文去掉了内边距），不加边框，页面按自己的样式渲染 */
+.kw-preview-html {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.kw-end-notice {
+  font-size: var(--kw-font-sm);
+  color: var(--kw-text-secondary);
+}
+
+/* Word 原件预览（DocxView）：docx-preview 自带灰底与白色页面，这里只管滚动和高亮 */
+.kw-docx-view {
+  height: 100%;
+  overflow: auto;
+  background: var(--kw-document-bg);
+}
+
+.kw-docx-view .docx-wrapper {
+  background: transparent;
+}
+
+.kw-docx-view .kw-docx-mark {
+  border-radius: 2px;
+  background-color: color-mix(in srgb, var(--kw-link) 14%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--kw-link) 14%, transparent);
+  /* 定位后高亮区的顶端对齐视口顶部，上面留一点边距 */
+  scroll-margin-top: 24px;
+}
+
+/* 表格的格子各有底色，整张描一圈 */
+.kw-docx-view table.kw-docx-mark {
+  outline: 2px solid color-mix(in srgb, var(--kw-link) 55%, transparent);
+  outline-offset: 2px;
+}
+
+/* 调用方读的文件（本机文件）读不出来时，说明下面摆它的操作（「打开」） */
+.kw-preview-problem-actions {
+  padding: 0 20px 20px;
+}
+
+/* 并排在对话右边的编辑区（FileEditPane）：头部同抽屉，正文是编辑器，铺满 */
+.kw-file-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--color-surface);
+}
+
+.kw-file-pane-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.kw-file-pane-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: clip;
+}
+
+.kw-file-pane-body.is-padded {
+  padding: 16px 20px 24px;
+  overflow: auto;
+}
+
+/* 文件旁边的目录树（照官方：预览旁边的目录树，默认 260 宽） */
+.kw-file-pane-aside {
+  display: flex;
+  flex: 0 0 260px;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--color-border-subtle);
+}
+
+/* 抽屉里的在线编辑器（本机 Word）：铺满抽屉正文，编辑器自己管滚动与工具栏 */
+.kw-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* AI 改了文件、编辑器里又有没存的改动时的一行说明（使用端不上色：文字加两个按钮） */
+.kw-editor-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-editor-notice > span {
+  margin-right: auto;
+}
+
+.kw-editor-frame {
+  flex: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 70vh;
+  border: 0;
+  background: var(--color-surface-secondary, #f4f4f4);
+}
+
+/* 只读预览上面的一行说明（PreviewFile.readOnlyNote）：说明在上、预览占其余 */
+.kw-preview-noted {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.kw-preview-note {
+  flex: none;
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+.kw-preview-noted-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}

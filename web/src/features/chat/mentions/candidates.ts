@@ -1,0 +1,209 @@
+/**
+ * @ 菜单的候选，全是纯函数：从接口给的知识库、技能与搜到的文件，排成各组的候选；按输入的字筛；
+ * 找出输入框里光标前正在打的 @。
+ */
+import type {
+  Mention,
+  MentionBase,
+  MentionDocument,
+  MentionExtension,
+  MentionOptions,
+  MentionService,
+  MentionSkill,
+} from '../../../api/mentions';
+import { extensionGroup, type MentionGroup } from './kinds';
+
+/** 一个候选：选中后成为的 @，和名字下面那行小字（在哪里、是什么）。 */
+export interface Candidate {
+  readonly mention: Mention;
+  readonly detail: string;
+}
+
+export interface Section {
+  readonly group: MentionGroup;
+  readonly items: readonly Candidate[];
+  /** 筛完一共几项（直接输入时每组只露前几项） */
+  readonly total: number;
+}
+
+/** 直接输入查找时每组露几项，其余点「查看全部」进组里看。 */
+export const FLAT_LIMIT = 5;
+
+/** 目录：知识库所在目录的每一级都能选，选了等于选下面全部的知识库。 */
+function folderCandidates(bases: readonly MentionBase[]): Candidate[] {
+  const folders = new Map<string, string[]>();
+  for (const base of bases) {
+    for (let depth = 1; depth <= base.path.length; depth += 1) {
+      const path = base.path.slice(0, depth).join('/');
+      folders.set(path, [...(folders.get(path) ?? []), base.id]);
+    }
+  }
+  return [...folders.entries()]
+    .sort(([a], [b]) => a.localeCompare(b, 'zh'))
+    .map(([path, ids]) => ({
+      mention: { type: 'folder', id: path, name: path, bases: ids },
+      detail: `目录 · ${ids.length} 个知识库`,
+    }));
+}
+
+function baseCandidates(bases: readonly MentionBase[]): Candidate[] {
+  return [
+    ...folderCandidates(bases),
+    ...bases.map((base) => ({
+      mention: { type: 'knowledge_base' as const, id: base.id, name: base.name },
+      detail: [base.path.join('/'), base.description].filter(Boolean).join(' · '),
+    })),
+  ];
+}
+
+function tagCandidates(bases: readonly MentionBase[]): Candidate[] {
+  return bases
+    .filter((base) => base.pinnable)
+    .flatMap((base) =>
+      base.tags.map((tag) => ({
+        mention: { type: 'tag' as const, id: tag, name: tag, base: base.id, baseName: base.name },
+        detail: `在知识库「${base.name}」`,
+      })),
+    );
+}
+
+function documentCandidates(documents: readonly MentionDocument[]): Candidate[] {
+  return documents.map((doc) => ({
+    mention: { type: 'document', id: doc.id, name: doc.title, base: doc.base, baseName: doc.baseName },
+    detail: `在知识库「${doc.baseName}」`,
+  }));
+}
+
+const SERVICE_STATUS: Record<MentionService['status'], string> = {
+  ready: '可以直接用',
+  connected: '已连接',
+  invalid: '连接已失效',
+};
+
+function serviceCandidates(services: readonly MentionService[]): Candidate[] {
+  return services.map((service) => ({
+    mention: { type: 'mcp', id: service.name, name: service.title },
+    detail: `${service.tools} 个工具 · ${SERVICE_STATUS[service.status]}`,
+  }));
+}
+
+function skillCandidates(skills: readonly MentionSkill[]): Candidate[] {
+  return skills.map((skill) => ({
+    mention: { type: 'skill', id: skill.name, name: skill.name },
+    detail: skill.description,
+  }));
+}
+
+function extensionCandidates(extension: MentionExtension | undefined): Candidate[] {
+  if (!extension) return [];
+  return extension.items.map((item) => ({
+    mention: {
+      type: 'extension',
+      kind: extension.kind,
+      label: extension.label,
+      id: item.id,
+      name: item.name,
+    },
+    detail: item.description,
+  }));
+}
+
+export function groupCandidates(
+  group: MentionGroup,
+  options: MentionOptions,
+  documents: readonly MentionDocument[],
+): readonly Candidate[] {
+  if (group.startsWith('ext:'))
+    return extensionCandidates(options.extensions.find((e) => extensionGroup(e.kind) === group));
+  switch (group) {
+    case 'bases':
+      return baseCandidates(options.bases);
+    case 'documents':
+      return documentCandidates(documents);
+    case 'tags':
+      return tagCandidates(options.bases);
+    case 'services':
+      return serviceCandidates(options.services);
+    case 'skills':
+      return skillCandidates(options.skills);
+    default:
+      return [];
+  }
+}
+
+/** 所有分组的先后：「在哪里找」（知识库、文件、标签、扩展登记的）在前，MCP、技能在后。 */
+export function groupOrder(options: MentionOptions): readonly MentionGroup[] {
+  return [
+    'bases',
+    'documents',
+    'tags',
+    ...options.extensions.map((e) => extensionGroup(e.kind)),
+    'services',
+    'skills',
+  ];
+}
+
+/** 名字或那行小字里有这几个字（不分大小写）。文件已经按名字在服务端搜过，不再筛。 */
+export function matching(items: readonly Candidate[], query: string): readonly Candidate[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return items;
+  return items.filter(
+    (item) => item.mention.name.toLowerCase().includes(needle) || item.detail.toLowerCase().includes(needle),
+  );
+}
+
+/** 菜单要显示的分组：进了某一组就是这一组的全部；直接输入时各组前几项。 */
+export function sections(
+  options: MentionOptions,
+  documents: readonly MentionDocument[],
+  query: string,
+  group: MentionGroup | null,
+): readonly Section[] {
+  const groups: readonly MentionGroup[] = group ? [group] : groupOrder(options);
+  return groups.flatMap((name) => {
+    const all = groupCandidates(name, options, documents);
+    const found = name === 'documents' ? all : matching(all, query);
+    if (found.length === 0) return [];
+    return [{ group: name, items: group ? found : found.slice(0, FLAT_LIMIT), total: found.length }];
+  });
+}
+
+/** 光标前正在打的 @：在开头或空白后面，到光标之间没有空白（邮箱里的 @ 不算，照官方 @file 的规则）。 */
+export interface Trigger {
+  readonly start: number;
+  readonly query: string;
+}
+
+const MAX_QUERY = 50;
+/** 带引号的（工作文件夹里带空格的路径）可以长一些 */
+const MAX_QUOTED = 200;
+
+/**
+ * 光标前正在打的 @：开头或空白后的 @，到光标之间没有空白；或照官方 @file 语法的 @"带空格的路径（引号还没合上），
+ * 查找词是引号后面那段（工作文件夹里选了带空格的文件夹会写成这样，接着往下列）。
+ */
+export function activeTrigger(value: string, caret: number): Trigger | null {
+  const before = value.slice(0, caret);
+  const quoted = /(^|\s)@"([^"]*)$/.exec(before);
+  if (quoted && (quoted[2] ?? '').length <= MAX_QUOTED) {
+    return { start: before.length - (quoted[2] ?? '').length - 2, query: quoted[2] ?? '' };
+  }
+  const at = before.lastIndexOf('@');
+  if (at < 0 || (at > 0 && !/\s/.test(before[at - 1] ?? ''))) return null;
+  const query = before.slice(at + 1);
+  if (/\s/.test(query) || query.length > MAX_QUERY) return null;
+  return { start: at, query };
+}
+
+/** 选中以后，把打出来的「@查找词」从输入框里去掉。 */
+export function withoutTrigger(value: string, trigger: Trigger, caret: number): string {
+  return value.slice(0, trigger.start) + value.slice(caret);
+}
+
+/** 重新生成时，事件流里的目录 @ 只有路径：按现在的知识库目录重新展开成下面的知识库。 */
+export function expandFolder(path: string, bases: readonly MentionBase[]): readonly string[] {
+  const parts = path.split('/');
+  return bases
+    .filter((base) => parts.every((part, index) => base.path[index] === part))
+    .map((base) => base.id);
+}
