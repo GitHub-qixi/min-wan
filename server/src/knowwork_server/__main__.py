@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -82,7 +83,11 @@ def main() -> None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for signum in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(signum, stop.set)
+            # Windows 的 ProactorEventLoop 不支持 add_signal_handler
+            if os.name == "nt":
+                signal.signal(signum, lambda *_: loop.call_soon_threadsafe(stop.set))
+            else:
+                loop.add_signal_handler(signum, stop.set)
         return await serve(get_settings(), stop)
 
     if asyncio.run(run(), loop_factory=loop_factory()):

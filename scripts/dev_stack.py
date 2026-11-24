@@ -30,6 +30,7 @@ import pgserver
 ROOT = Path(__file__).resolve().parent.parent
 DEV = ROOT / ".dev"
 PINNED_NODE_BIN = Path.home() / ".nvm/versions/node/v24.18.0/bin"
+IS_WINDOWS = os.name == "nt"
 
 
 def _node_bin() -> Path:
@@ -37,12 +38,51 @@ def _node_bin() -> Path:
     configured = os.environ.get("KNOWWORK_NODE_BIN")
     if configured:
         return Path(configured)
-    if (PINNED_NODE_BIN / "node").exists():
+    if (PINNED_NODE_BIN / "node").exists() or (PINNED_NODE_BIN / "node.exe").exists():
         return PINNED_NODE_BIN
     found = shutil.which("node")
     if found is None:
         sys.exit("找不到 node：请安装 Node.js 24.9 以上，或用 KNOWWORK_NODE_BIN 指定所在目录")
     return Path(found).parent
+
+
+def _node_script(js_path: Path) -> list[str]:
+    """用 node 直接跑 npm 包入口，避开 Windows 上 .cmd + watchfiles/shlex 的坑。"""
+    node = NODE_BIN / ("node.exe" if IS_WINDOWS else "node")
+    if not node.exists():
+        node = Path(shutil.which("node") or "node")
+    return [str(node), str(js_path)]
+
+
+def _link_dir(link: Path, target: Path) -> None:
+    """目录链接：优先符号链接；Windows 无特权时退到 junction，再不行就拷贝。"""
+    if link.exists() or link.is_symlink():
+        if link.is_dir() and not link.is_symlink():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except OSError:
+        if not IS_WINDOWS:
+            raise
+    # junction 不需要管理员 / 开发者模式
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not link.exists():
+        shutil.copytree(target, link)
+
+
+def _stop_tree(proc: subprocess.Popen, sig: int) -> None:
+    if proc.poll() is not None:
+        return
+    if IS_WINDOWS:
+        # /T 连子进程一起停；没有 Unix 的进程组概念。Windows 上统一强杀即可。
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+    os.killpg(proc.pid, sig)
 
 
 NODE_BIN = _node_bin()
@@ -55,7 +95,10 @@ def secret(name: str) -> str:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(secrets.token_hex(32))
-        path.chmod(0o600)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
     return path.read_text().strip()
 
 
@@ -70,20 +113,20 @@ def install_profile(home: Path) -> None:
         shutil.copy(ROOT / "runtime-host/profile" / name, profile / name)
     modules = profile / "node_modules" / "@knowwork"
     modules.mkdir(parents=True)
-    (modules / "dsh-host").symlink_to(ROOT / "runtime-host/plugins/dsh-host")
-    (modules / "dsh-host-bundle").symlink_to(ROOT / "runtime-host/plugins/host-bundle")
+    _link_dir(modules / "dsh-host", ROOT / "runtime-host/plugins/dsh-host")
+    _link_dir(modules / "dsh-host-bundle", ROOT / "runtime-host/plugins/host-bundle")
     extra = [name.strip() for name in os.environ.get("KNOWWORK_HOST_BUNDLES", "").split(",") if name.strip()]
     if extra:
         installed = ROOT / "runtime-host/node_modules"
         shared = installed / "@knowwork" / "dsh-host"
         if not shared.exists():
             shared.parent.mkdir(parents=True, exist_ok=True)
-            shared.symlink_to(ROOT / "runtime-host/plugins/dsh-host")
+            _link_dir(shared, ROOT / "runtime-host/plugins/dsh-host")
         manifest = json.loads((profile / "package.json").read_text())
         for name in extra:
             link = profile / "node_modules" / name
             link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(installed / name)
+            _link_dir(link, installed / name)
             manifest["dsh"]["profile"]["bundles"].append(name)
         (profile / "package.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
 
@@ -91,8 +134,12 @@ def install_profile(home: Path) -> None:
 def start(name: str, args: list[str], *, cwd: Path, env: dict) -> subprocess.Popen:
     print(f"启动 {name}，日志 .dev/logs/{name}.log")
     with open(DEV / "logs" / f"{name}.log", "ab") as log:  # 子进程继承文件描述符，父进程这边可以关
-        return subprocess.Popen(args, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+        kwargs = {"cwd": cwd, "env": env, "stdout": log, "stderr": subprocess.STDOUT}
+        if IS_WINDOWS:
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(args, **kwargs)
 
 
 def watched(command: list[str], paths: list[Path], *, python_only: bool) -> list[str]:
@@ -101,7 +148,11 @@ def watched(command: list[str], paths: list[Path], *, python_only: bool) -> list
 
     - 业务服务重启时，进行中的回答接得上：事件泵起来后从库里最后一条接着读宿主的事件，页面的流断一下自己重连；
     - worker 正在跑的任务被打断，租约到期后重新领；
-    - 宿主重启时正在进行的回答会中断，要重发（宿主的会话状态在它自己进程里）。"""
+    - 宿主重启时正在进行的回答会中断，要重发（宿主的会话状态在它自己进程里）。
+
+    Windows 上 watchfiles 的 command 模式对盘符路径处理不好，先直接跑（改代码需手动重启）。"""
+    if IS_WINDOWS:
+        return command
     return [sys.executable, "-m", "watchfiles", "--target-type", "command", "--filter",
             "python" if python_only else "default", "--sigint-timeout", "15", shlex.join(command), *map(str, paths)]
 
@@ -134,17 +185,28 @@ def wait_healthy(url: str, proc: subprocess.Popen, timeout: float = 90.0) -> boo
 def main() -> int:
     (DEV / "logs").mkdir(parents=True, exist_ok=True)
     pg = pgserver.get_server(str(DEV / "pg"), cleanup_mode="stop")
-    socket_dir = pg.get_uri().split("host=")[1]
+    # Unix：postgresql://...?host=/tmp/socket_dir；Windows：postgresql://postgres:@127.0.0.1:端口/postgres
+    pg_uri = pg.get_uri()
+    if "host=" in pg_uri:
+        socket_dir = pg_uri.split("host=")[1]
+        migration_url = f"postgresql+asyncpg://postgres@/postgres?host={socket_dir}"
+        database_url = f"postgresql+asyncpg://{APP_ROLE}@/postgres?host={socket_dir}"
+    else:
+        # 例如 postgresql://postgres:@127.0.0.1:6145/postgres
+        after_at = pg_uri.split("@", 1)[1]
+        hostport, _, dbname = after_at.partition("/")
+        dbname = dbname.split("?", 1)[0] or "postgres"
+        migration_url = f"postgresql+asyncpg://postgres@{hostport}/{dbname}"
+        database_url = f"postgresql+asyncpg://{APP_ROLE}@{hostport}/{dbname}"
     # 和部署包一样分两个账号：超级用户 postgres 只做迁移（表的 owner），业务服务与 worker 用普通账号 APP_ROLE 连库。
     # 原来本机一直用超级用户跑，超级用户绕过行级安全，一个空间能读到别的空间的数据，隔离问题在本机永远试不出来
     # （2026-10-27 走查多空间时撞上）。
     pg.psql(f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN "
             f"CREATE ROLE {APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;")
-    migration_url = f"postgresql+asyncpg://postgres@/postgres?host={socket_dir}"
-    database_url = f"postgresql+asyncpg://{APP_ROLE}@/postgres?host={socket_dir}"
     host_token = secret("host_token")
     internal = f"http://127.0.0.1:{INTERNAL_PORT}"
-    base_env = {**os.environ, "PATH": f"{NODE_BIN}:{os.environ['PATH']}"}
+    base_env = {**os.environ, "PATH": f"{NODE_BIN}{os.pathsep}{os.environ['PATH']}",
+                "PYTHONUNBUFFERED": "1"}
     for proxy in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
         base_env.pop(proxy, None)
     # 一律不走代理：本机各服务之间、以及局域网里的模型服务都要直连。只去掉代理变量不够——
@@ -153,7 +215,8 @@ def main() -> int:
 
     home = DEV / "dsh"
     install_profile(home)
-    host = start("runtime-host", watched([str(ROOT / "runtime-host/node_modules/.bin/dsh"), "--profile", "knowwork-host"],
+    dsh_cmd = _node_script(ROOT / "runtime-host/node_modules/@deepseek-ai/dsh/lib/bin.js")
+    host = start("runtime-host", watched([*dsh_cmd, "--profile", "knowwork-host"],
                                          [ROOT / "runtime-host/plugins"], python_only=False),
                  cwd=ROOT / "runtime-host", env={
                      **base_env, "DSH_HOME": str(home), "KNOWWORK_HOST_TOKEN": host_token,
@@ -185,7 +248,8 @@ def main() -> int:
         print("业务服务没能起来，看 .dev/logs/server.log")
     worker = start("worker", watched([sys.executable, "-m", "knowwork_server.ops.worker"], sources, python_only=True),
                    cwd=ROOT / "server", env=app_env)
-    web = start("web", [str(ROOT / "web/node_modules/.bin/vite"), "--host", "127.0.0.1", "--port", str(WEB_PORT),
+    vite_cmd = _node_script(ROOT / "web/node_modules/vite/bin/vite.js")
+    web = start("web", [*vite_cmd, "--host", "127.0.0.1", "--port", str(WEB_PORT),
                         "--strictPort"], cwd=ROOT / "web", env=base_env)
     processes = {"runtime-host": host, "server": server, "worker": worker, "web": web}
     print(f"\n前端：http://127.0.0.1:{WEB_PORT}  （首次打开进入初始化向导，创建管理员）\n")
@@ -207,13 +271,12 @@ def main() -> int:
             time.sleep(1)
     finally:
         for proc in processes.values():
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGTERM)
+            _stop_tree(proc, signal.SIGTERM)
         for proc in processes.values():
             try:
                 proc.wait(10)
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+                _stop_tree(proc, signal.SIGKILL)
         pg.cleanup()
     return 0
 

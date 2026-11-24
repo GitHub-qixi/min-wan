@@ -1,12 +1,46 @@
-# 测试与本地开发产物
+# Local / test artifacts
 .coverage
-node_modules
-deploy/.env
-# 打包脚本的输出
-/dist/
-.dev/
-# 没配 KNOWWORK_BLOB_DIR 时，在 server/ 下跑服务或测试，文件默认存到这里
-server/data/
+coverage/
+*.tsbuildinfo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 __pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# Build output
+/dist/
+web/dist/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Dev stack & secrets
+.dev/
+.dsh-home/
 .gstack/
-.lgx
+.lgx/
+deploy/.env
+.env
+.env.*
+!.env.example
+
+# Runtime data (default blob store when KNOWWORK_BLOB_DIR unset)
+server/data/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*~
